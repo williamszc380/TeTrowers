@@ -5,9 +5,13 @@
  * x in [-1, FIELD_WIDTH + 1]. Each sample holds the highest top surface above it (the
  * exact upper envelope of the rotated cells) and the block that owns that surface.
  *
- * Assisted mode only offers positions where the piece's cell grid lines up with the grid
- * of the block it would land on, so edges stay flush on a drifted tower. Over the void,
- * the bare platform or a badly tilted block it falls back to half-block steps.
+ * Assisted mode offers the half-block grid plus every x where a column boundary of the piece
+ * (x + j, j = 0..w) lies on a corner below it: the two top corners, at their world x (so
+ * drifted and tilted blocks are followed), of each cell with no cell of its own block above
+ * it, for every block that owns part of the skyline, and the platform's two edges. Positions
+ * closer than CANDIDATE_MERGE (0.08) are one spot: a corner-aligned one beats a grid one; of
+ * near-duplicate corner-aligned ones the one on a corner of the block the piece would land
+ * on stays, else the one on the higher corner (a covered corner is lower), else the lower x.
  */
 (function (TT) {
   'use strict';
@@ -16,14 +20,13 @@
 
   const FIELD_WIDTH = C.FIELD_WIDTH;
   const GRID_STEP = C.FIXED_STEP;                     // the half-block grid
-  const ALIGN_EPS = C.ALIGN_EPS;
-  const ALIGN_MAX_TILT = C.ALIGN_MAX_TILT;
   const SAMPLES_PER_CELL = (C.SAMPLES_PER_CELL != null ? C.SAMPLES_PER_CELL : 32);
   const LANDING_EDGE = (C.LANDING_EDGE != null ? C.LANDING_EDGE : 0.04);     // neighbours merely touching a column don't count
   const SUPPORT_EPS = (C.SUPPORT_EPS != null ? C.SUPPORT_EPS : 0.03);        // contact tolerance for supports
   const SURFACE_MAX_SPEED = (C.SURFACE_MAX_SPEED != null ? C.SURFACE_MAX_SPEED : 2); // m/s; faster movers are not ground yet
-  // Positions closer than this are one spot to the player; the best aligned one is kept
-  const CANDIDATE_MERGE = (C.CANDIDATE_MERGE != null ? C.CANDIDATE_MERGE : Math.max(0.01, ALIGN_EPS));
+  // Positions closer than this are one spot to the player; a corner-aligned one is kept
+  const CANDIDATE_MERGE = (C.CANDIDATE_MERGE != null ? C.CANDIDATE_MERGE : 0.08);
+  const SAME_EPS = 1e-6;                              // positions this close are the same one
   const STEP_EPS = 0.01;                              // stepX ignores candidates closer than this
   const FLAT_TILT = 1e-3;                             // rad; flatter cells are rasterised as boxes
   const DEFAULT_PIXEL = 1 / 32;                       // manual step until the renderer reports a pixel size
@@ -71,11 +74,8 @@
     }
   }
 
-  // Rasterises a block's cells; returns its grid offset (the x of a grid line through its
-  // highest cell) or NaN when it is tilted too far to align to.
   function rasterBlock(sky, slots, quads, angle, slot) {
-    const tilt = tiltOf(angle);
-    if (Math.abs(tilt) < FLAT_TILT) {
+    if (Math.abs(tiltOf(angle)) < FLAT_TILT) {
       for (let i = 0; i < quads.length; i++) {
         const q = quads[i];
         rasterSpan(sky, slots, q.minX, q.maxX, q.maxY, slot);
@@ -83,17 +83,6 @@
     } else {
       for (let i = 0; i < quads.length; i++) rasterQuad(sky, slots, quads[i].pts, slot);
     }
-    if (!(Math.abs(tilt) <= ALIGN_MAX_TILT)) return NaN;
-    let best = quads[0];
-    for (let i = 1; i < quads.length; i++) if (quads[i].maxY > best.maxY) best = quads[i];
-    // Its world top-left corner (max y - x): pts[6] unless the block is quarter-turned
-    const p = best.pts;
-    let gx = p[0], score = p[1] - p[0];
-    for (let i = 2; i < 8; i += 2) {
-      const v = p[i + 1] - p[i];
-      if (v > score) { score = v; gx = p[i]; }
-    }
-    return gx;
   }
 
   // ---- Surface --------------------------------------------------------------------------
@@ -109,23 +98,22 @@
       hazards: null,
       _slots: new Int32Array(SKY_N),      // sample -> index into _blocks, -1 = empty
       _blocks: [],                        // slot -> block; slot 0 is the platform
-      _gx: null,                          // slot -> grid offset, NaN = not alignable
       _px: null, _py: null, _pa: null,    // slot -> body pose at build time
-      _ownerAt: null,                     // scratch for skylineOwners()
-      _owners: null,                      // lazily built list of alignable skyline owners
+      _seen: null,                        // slot scratch for surfaceCorners()
+      _pf: { x0: 0, x1: 0, top: 0 },      // the platform's edges (not on the integer grid)
+      _corners: null,                     // lazily built, see surfaceCorners()
       _cand: new Map()                    // shape id -> assisted candidates
     };
   }
 
   function ensureSlots(s, n) {
-    if (s._gx && s._gx.length >= n) return;
+    if (s._px && s._px.length >= n) return;
     let cap = 64;
     while (cap < n) cap *= 2;
-    s._gx = new Float64Array(cap);
     s._px = new Float64Array(cap);
     s._py = new Float64Array(cap);
     s._pa = new Float64Array(cap);
-    s._ownerAt = new Int32Array(cap);
+    s._seen = new Uint8Array(cap);
   }
 
   // opts: { exclude: Set<block> | null, hazards: { horizons, mines, spikes, glass } | null, reuse: surface | null }
@@ -138,13 +126,14 @@
     const blocks = physics.blocks;
     ensureSlots(s, blocks.length + 1);
     const sky = s.skyline, slots = s._slots, list = s._blocks;
-    const gx = s._gx, px = s._px, py = s._py, pa = s._pa;
+    const px = s._px, py = s._py, pa = s._pa;
     sky.fill(-Infinity);
     slots.fill(-1);
 
     const pf = physics.platform;
     list[0] = pf;
-    gx[0] = NaN; px[0] = 0; py[0] = 0; pa[0] = 0;
+    px[0] = 0; py[0] = 0; pa[0] = 0;
+    s._pf.x0 = pf.x0; s._pf.x1 = pf.x1; s._pf.top = pf.top;
     rasterSpan(sky, slots, pf.x0, pf.x1, pf.top, 0);
     let count = 1;
     const maxV2 = SURFACE_MAX_SPEED * SURFACE_MAX_SPEED;
@@ -160,7 +149,7 @@
       const p = body.getPosition(), a = body.getAngle();
       list[count] = b;
       px[count] = p.x; py[count] = p.y; pa[count] = a;
-      gx[count] = rasterBlock(sky, slots, physics.cellQuads(b), a, count);
+      rasterBlock(sky, slots, physics.cellQuads(b), a, count);
       count++;
     }
     list.length = count;
@@ -175,26 +164,64 @@
     s.top = top;
     s.hazards = o.hazards || null;
     s.version = ++buildCount;
-    s._owners = null;
+    s._corners = null;
     s._cand.clear();
     return s;
   }
 
-  // Distinct alignable blocks on the skyline with the sample span they cover
-  function skylineOwners(s) {
-    if (s._owners) return s._owners;
-    const slots = s._slots, gx = s._gx, at = s._ownerAt;
-    at.fill(0, 0, s._blocks.length);
-    const owners = [];
+  // ---- Corners --------------------------------------------------------------------------
+  // Local corners of the cell faces of a shape that look up in the world when its block is
+  // turned by q quarter turns (world up = local +y, +x, -y, -x), except faces covered by a
+  // cell of the same block: [x0, y0, x1, y1, ...], cached per (shape, q).
+  const faceCache = new Map();
+  function topCorners(shape, q) {
+    const key = shape.id + '/' + q;
+    let pts = faceCache.get(key);
+    if (pts) return pts;
+    const ux = q === 1 ? 1 : q === 3 ? -1 : 0, uy = q === 0 ? 1 : q === 2 ? -1 : 0;
+    const cells = shape.cells;
+    const has = (x, y) => cells.some((c) => c[0] === x && c[1] === y);
+    const out = [];
+    const add = (x, y) => {
+      for (let i = 0; i < out.length; i += 2) if (out[i] === x && out[i + 1] === y) return;
+      out.push(x, y);
+    };
+    for (let i = 0; i < cells.length; i++) {
+      const cx = cells[i][0], cy = cells[i][1];
+      if (has(cx + ux, cy + uy)) continue;
+      add(cx + (1 + ux - uy) / 2, cy + (1 + uy + ux) / 2);   // both ends of the face toward (ux, uy)
+      add(cx + (1 + ux + uy) / 2, cy + (1 + uy - ux) / 2);
+    }
+    pts = Object.freeze(out);
+    faceCache.set(key, pts);
+    return pts;
+  }
+
+  // The corners below, sorted by world x: the platform's edges, and the top corners of every
+  // block that owns part of the skyline at its pose of the build -> { x: [], y: [], slot: [] }.
+  // Built once per surface and shared by every shape.
+  function surfaceCorners(s) {
+    if (s._corners) return s._corners;
+    const slots = s._slots, blocks = s._blocks, seen = s._seen, pf = s._pf;
+    seen.fill(0, 0, blocks.length);
+    const xs = [pf.x0, pf.x1], ys = [pf.top, pf.top], ss = [0, 0];
     for (let k = 0; k < SKY_N; k++) {
       const sl = slots[k];
-      if (sl <= 0 || Number.isNaN(gx[sl])) continue;   // empty, platform or too tilted
-      const i = at[sl];
-      if (i) owners[i - 1].k1 = k;
-      else { owners.push({ slot: sl, gx: gx[sl], k0: k, k1: k }); at[sl] = owners.length; }
+      if (sl <= 0 || seen[sl]) continue;
+      seen[sl] = 1;
+      const a = s._pa[sl], cos = Math.cos(a), sin = Math.sin(a), px = s._px[sl], py = s._py[sl];
+      const pts = topCorners(blocks[sl].shape, ((Math.round(a / HALF_PI) % 4) + 4) % 4);
+      const n0 = xs.length;
+      for (let i = 0; i < pts.length; i += 2) {
+        const x = px + pts[i] * cos - pts[i + 1] * sin, y = py + pts[i] * sin + pts[i + 1] * cos;
+        let j = n0;
+        while (j < xs.length && Math.abs(xs[j] - x) > SAME_EPS) j++;
+        if (j === xs.length) { xs.push(x); ys.push(y); ss.push(sl); } else if (y > ys[j]) ys[j] = y;
+      }
     }
-    s._owners = owners;
-    return owners;
+    const order = xs.map((_, i) => i).sort((a, b) => xs[a] - xs[b]);
+    s._corners = { x: order.map((i) => xs[i]), y: order.map((i) => ys[i]), slot: order.map((i) => ss[i]) };
+    return s._corners;
   }
 
   // ---- Landing --------------------------------------------------------------------------
@@ -321,51 +348,85 @@
     return list;
   }
 
-  function onHalfGrid(x) {
-    const r = x / GRID_STEP;
-    return Math.abs(r - Math.round(r)) < 1e-6;
+  // How a piece at x lines up: whether a column boundary of it is on a corner of the block it
+  // would land on, and the highest corner one of its boundaries is on (-Infinity: none)
+  const fit = { onSupport: 0, height: -Infinity };
+  function cornerFit(s, shape, x) {
+    const c = s._corners, cx = c.x, n = cx.length;
+    const p = computeLanding(s, shape, x).slot;
+    fit.onSupport = 0; fit.height = -Infinity;
+    for (let j = 0; j <= shape.w; j++) {
+      const t = x + j;
+      let lo = 0, hi = n;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (cx[m] < t - SAME_EPS) lo = m + 1; else hi = m; }
+      for (let i = lo; i < n && cx[i] <= t + SAME_EPS; i++) {
+        if (c.slot[i] === p) fit.onSupport = 1;
+        if (c.y[i] > fit.height) fit.height = c.y[i];
+      }
+    }
+    return fit;
   }
 
+  let posBuf = new Float64Array(256);                 // scratch: corner-aligned positions
+  const clX = [], clOn = [], clH = [];                // scratch: one cluster of them
+
+  // Near-duplicate positions pos[i0..i1) (sorted, each closer than CANDIDATE_MERGE to the
+  // next) keep a spread no closer than that, preferring a corner of the block the piece
+  // would land on, then the higher corner (a covered one is lower), then the lower x.
+  function pickCluster(s, shape, pos, i0, i1, out) {
+    clX.length = clOn.length = clH.length = 0;
+    for (let i = i0; i < i1; i++) {
+      if (clX.length && pos[i] - clX[clX.length - 1] < SAME_EPS) continue;
+      const f = cornerFit(s, shape, pos[i]);
+      clX.push(pos[i]); clOn.push(f.onSupport); clH.push(f.height);
+    }
+    const order = clX.map((_, i) => i).sort((a, b) => (clOn[b] - clOn[a]) || (clH[b] - clH[a]) || (clX[a] - clX[b]));
+    const start = out.length;
+    for (let o = 0; o < order.length; o++) {
+      const x = clX[order[o]];
+      let k = start;
+      while (k < out.length && Math.abs(out[k] - x) >= CANDIDATE_MERGE) k++;
+      if (k === out.length) out.push(x);
+    }
+  }
+
+  // The half grid plus every position with a column boundary of the piece (0..w) on a
+  // corner below; where a corner-aligned position and a grid one are closer than
+  // CANDIDATE_MERGE, the corner-aligned one stays.
   function assistedCandidates(s, shape) {
     const w = shape.w, maxX = FIELD_WIDTH - w;
     const grid = halfGrid(w);
-    // Seeds: the half grid, plus every grid position of each alignable skyline block
-    // where the piece would overlap it
-    const seeds = grid.slice();
-    const owners = skylineOwners(s);
-    for (let i = 0; i < owners.length; i++) {
-      const o = owners[i];
-      const lo = Math.max(0, sampleX(o.k0) - w), hi = Math.min(maxX, sampleX(o.k1));
-      for (let k = Math.ceil(lo - o.gx); o.gx + k <= hi; k++) seeds.push(o.gx + k);
-    }
-
-    const gx = s._gx, xs = [], errs = [];
-    for (let i = 0; i < seeds.length; i++) {
-      const x = seeds[i];
-      const p = computeLanding(s, shape, x).slot;
-      let err = 0;
-      if (p > 0 && !Number.isNaN(gx[p])) {
-        const d = x - gx[p];
-        err = Math.abs(d - Math.round(d));
-        if (err > ALIGN_EPS) continue;
-        if (err < 1e-6) err = 0;
-      } else if (!onHalfGrid(x)) {
-        continue;
+    const corners = surfaceCorners(s).x;
+    const need = corners.length * (w + 1);
+    if (posBuf.length < need) posBuf = new Float64Array(need * 2);
+    let n = 0;
+    for (let i = 0; i < corners.length; i++) {
+      for (let j = 0; j <= w; j++) {
+        const x = corners[i] - j;
+        if (x > -SAME_EPS && x < maxX + SAME_EPS) posBuf[n++] = clamp(x, 0, maxX);
       }
-      xs.push(x);
-      errs.push(err);
     }
-    if (!xs.length) return grid;
+    if (!n) return grid;
+    const pos = posBuf.subarray(0, n).sort();
+    const aligned = [];
+    for (let i = 0; i < n;) {
+      let e = i + 1;
+      while (e < n && pos[e] - pos[e - 1] < CANDIDATE_MERGE) e++;
+      if (pos[e - 1] - pos[i] < SAME_EPS) aligned.push(pos[i]);
+      else pickCluster(s, shape, pos, i, e, aligned);
+      i = e;
+    }
+    aligned.sort((a, b) => a - b);
 
-    const order = xs.map((_, i) => i).sort((a, b) => (errs[a] - errs[b]) || (xs[a] - xs[b]));
     const out = [];
-    for (let i = 0; i < order.length; i++) {
-      const x = xs[order[i]];
-      let dup = false;
-      for (let j = 0; j < out.length && !dup; j++) dup = Math.abs(out[j] - x) <= CANDIDATE_MERGE;
-      if (!dup) out.push(x);
+    let k = 0;
+    for (let i = 0; i < grid.length; i++) {
+      const g = grid[i];
+      while (k < aligned.length && aligned[k] < g) out.push(aligned[k++]);
+      if ((k > 0 && g - aligned[k - 1] < CANDIDATE_MERGE) || (k < aligned.length && aligned[k] - g < CANDIDATE_MERGE)) continue;
+      out.push(g);
     }
-    out.sort((a, b) => a - b);
+    while (k < aligned.length) out.push(aligned[k++]);
     return Object.freeze(out);
   }
 
@@ -429,6 +490,6 @@
   TT.Placement = {
     buildSurface, landing, candidates, stepX, snapX, clampX, guideTarget,
     tiltOf, sampleX,
-    SAMPLES_PER_CELL, SKY_X0, LANDING_EDGE
+    SAMPLES_PER_CELL, SKY_X0, LANDING_EDGE, CANDIDATE_MERGE
   };
 })(typeof window !== 'undefined' ? (window.TT = window.TT || {}) : (global.TT = global.TT || {}));

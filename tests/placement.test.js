@@ -9,7 +9,10 @@ const C = TT.CONFIG;
 const P = TT.Placement;
 const S = TT.SHAPES;
 const FW = C.FIELD_WIDTH;
+const PX0 = C.PLATFORM_X0, PX1 = C.PLATFORM_X1;     // 4.9 and 11.1: not on the integer grid
+const MERGE = P.CANDIDATE_MERGE;
 const ALL_SHAPES = TT.TETROMINO_IDS.concat(['P1']);
+assert.strictEqual(MERGE, 0.08);
 
 // ---- helpers ------------------------------------------------------------------------
 // A static block placed exactly (cell geometry is then exact, no physics noise)
@@ -33,34 +36,58 @@ function nearList(actual, expected, eps, msg) {
 }
 const frac = (v) => v - Math.floor(v);
 const onHalf = (x) => Math.abs(x * 2 - Math.round(x * 2)) < 1e-6;
-const aligned = (x, o, eps) => { const f = frac(x - o); return f <= eps || f >= 1 - eps; };
+const has = (list, x) => list.some((v) => Math.abs(v - x) < 1e-9);
 function halfGrid(w) {
   const out = [];
   for (let i = 0; i * 0.5 <= FW - w + 1e-9; i++) out.push(i * 0.5);
   return out;
 }
-// Grid offset as the assisted mode defines it: world top-left corner of the highest cell
-function gridOffset(ph, b) {
-  let best = null;
-  for (const q of ph.cellQuads(b)) if (!best || q.maxY > best.maxY) best = q;
-  let gx = best.pts[0], score = best.pts[1] - best.pts[0];
-  for (let i = 2; i < 8; i += 2) if (best.pts[i + 1] - best.pts[i] > score) { score = best.pts[i + 1] - best.pts[i]; gx = best.pts[i]; }
-  return gx;
+// Corner-aligned positions: a column boundary j (0..w) of the piece on one of the corners
+function alignedTo(corners, w) {
+  const out = [];
+  for (const c of corners) for (let j = 0; j <= w; j++) if (c - j > -1e-6 && c - j < FW - w + 1e-6) out.push(c - j);
+  return out.sort((a, b) => a - b);
 }
-// Every assisted candidate must obey the contract's validity rule; the list is sorted,
-// in range and free of near-duplicates.
+const platformAligned = (w) => alignedTo([PX0, PX1], w);
+// Brute-force reference of the corners below, from the exact world geometry: the platform's
+// edges plus, for every block owning part of the skyline, both ends of each cell's face that
+// looks up most, unless another cell of the same block sits right behind that face.
+function refCorners(ph, s) {
+  const out = [ph.platform.x0, ph.platform.x1];
+  for (const b of new Set(s.owner.filter((o) => o && !o.isPlatform))) {
+    const quads = ph.cellQuads(b);
+    for (const q of quads) {
+      let best = -1, bestY = -Infinity;
+      for (let i = 0; i < 8; i += 2) {
+        const my = (q.pts[i + 1] + q.pts[(i + 3) & 7]) / 2;
+        if (my > bestY) { bestY = my; best = i; }
+      }
+      const ax = q.pts[best], ay = q.pts[best + 1], bx = q.pts[(best + 2) & 7], by = q.pts[(best + 3) & 7];
+      const nx = ax + bx - q.x, ny = ay + by - q.y;     // centre of the cell behind that face
+      if (quads.some((o) => o !== q && Math.hypot(o.x - nx, o.y - ny) < 0.1)) continue;
+      out.push(ax, bx);
+    }
+  }
+  return out;
+}
+// The assisted contract: sorted, in range, no two positions closer than MERGE; every one is
+// on the half grid or corner-aligned; every half-grid position is there unless a corner-
+// aligned one closer than MERGE replaced it; every corner-aligned position is there or has
+// a corner-aligned stand-in closer than MERGE.
 function checkAssisted(ph, s, shape, cand, label) {
+  const want = alignedTo(refCorners(ph, s), shape.w);
+  const isAligned = (x) => want.some((v) => Math.abs(v - x) < 1e-6);
+  const standIn = (x) => cand.some((v) => Math.abs(v - x) < MERGE && isAligned(v));
+  assert.ok(Object.isFrozen(cand), label + ': frozen');
   for (let i = 0; i < cand.length; i++) {
     const x = cand[i];
     assert.ok(x >= -1e-9 && x <= FW - shape.w + 1e-9, label + ': in range ' + x);
-    if (i) assert.ok(cand[i] - cand[i - 1] > 0.01, label + ': sorted & deduplicated at ' + x);
-    const L = P.landing(s, shape, x);
-    const p = L.primary;
-    if (p && !p.isPlatform && Math.abs(P.tiltOf(p.body.getAngle())) <= C.ALIGN_MAX_TILT) {
-      assert.ok(aligned(x, gridOffset(ph, p), C.ALIGN_EPS + 1e-9), label + ': x=' + x + ' aligned to block ' + p.id);
-    } else {
-      assert.ok(onHalf(x), label + ': x=' + x + ' on the half grid (no alignable primary)');
-    }
+    if (i) assert.ok(cand[i] - cand[i - 1] >= MERGE - 1e-9, label + ': sorted & merged at ' + cand[i - 1] + ', ' + x);
+    assert.ok(onHalf(x) || isAligned(x), label + ': x=' + x + ' on the half grid or corner-aligned');
+  }
+  for (const g of halfGrid(shape.w)) assert.ok(has(cand, g) || standIn(g), label + ': half-grid ' + g + ' present or merged');
+  for (const a of want) {
+    assert.ok(cand.some((v) => Math.abs(v - a) < 1e-6) || standIn(a), label + ': corner-aligned ' + a.toFixed(4) + ' present or merged');
   }
 }
 
@@ -71,26 +98,41 @@ function checkAssisted(ph, s, shape, cand, label) {
   assert.ok(s.skyline instanceof Float32Array);
   assert.strictEqual(s.skyline.length, (FW + 2) * 32);
   assert.strictEqual(s.owner.length, s.skyline.length);
-  // samples over the platform belong to it, beyond it are empty
+  // samples over the platform (6.2 wide, off the integer grid) belong to it, beyond it are empty
+  assert.ok(ph.platform.x0 === PX0 && ph.platform.x1 === PX1 && PX1 - PX0 > 6.1, 'platform ' + PX0 + '..' + PX1);
+  let onPlatform = 0;
   for (let k = 0; k < s.skyline.length; k++) {
     const x = P.sampleX(k);
-    if (x > 5 && x < 11) { assert.strictEqual(s.skyline[k], 0); assert.strictEqual(s.owner[k], ph.platform); }
+    if (x > PX0 && x < PX1) { assert.strictEqual(s.skyline[k], 0); assert.strictEqual(s.owner[k], ph.platform); onPlatform++; }
     else { assert.strictEqual(s.skyline[k], -Infinity); assert.strictEqual(s.owner[k], null); }
   }
+  assert.strictEqual(onPlatform, 198, '6.2 cells of samples');
+  // assisted: the half grid plus every position with a column boundary on a platform edge
   for (const id of ALL_SHAPES) {
     const shape = S[id];
-    assert.deepStrictEqual(Array.from(P.candidates(s, shape, 'assisted')), halfGrid(shape.w), id + ' assisted = half grid');
+    const cand = P.candidates(s, shape, 'assisted');
+    nearList(Array.from(cand), halfGrid(shape.w).concat(platformAligned(shape.w)).sort((a, b) => a - b), 1e-9, id + ' assisted on the bare platform');
+    checkAssisted(ph, s, shape, cand, id + ' bare platform');
     assert.deepStrictEqual(Array.from(P.candidates(s, shape, 'fixed')), halfGrid(shape.w), id + ' fixed = half grid');
   }
+  const o = P.candidates(s, S.O0, 'assisted');
+  for (const [x, what] of [[4.9, 'left edge on the left edge'], [3.9, 'middle on the left edge'], [2.9, 'right edge on the left edge'],
+    [11.1, 'left edge on the right edge'], [10.1, 'middle on the right edge'], [9.1, 'right edge on the right edge']]) {
+    assert.ok(has(o, x), 'O0 at ' + x + ': ' + what);
+  }
+  assert.ok(has(o, 5) && has(o, 9) && has(o, 9.5), 'the half grid stays next to them (0.1 apart)');
   const L = P.landing(s, S.O0, 7);
   assert.strictEqual(L.y, 0);
   assert.strictEqual(L.void, false);
   assert.strictEqual(L.primary, ph.platform);
   assert.deepStrictEqual(L.supports, [ph.platform]);
   assert.deepStrictEqual(L.warnings, []);
+  assert.strictEqual(P.landing(s, S.O0, 4.9).primary, ph.platform, 'flush with the left edge');
+  assert.strictEqual(P.landing(s, S.O0, 9.1).primary, ph.platform, 'flush with the right edge');
   assert.strictEqual(P.landing(s, S.O0, 4.5).y, 0, 'partly over the edge still lands');
+  assert.strictEqual(P.landing(s, S.O0, 3).y, 0, 'overlapping the edge by 0.06 lands');
   assert.strictEqual(P.landing(s, S.O0, 10.5).y, 0);
-  for (const x of [0, 3, 3.02, 11, 13.5, 14]) {            // 3 and 11 merely touch the platform edge
+  for (const x of [0, 2.9, 2.92, 11.1, 13.5, 14]) {        // 2.9 and 11.1 merely touch the platform edge
     const v = P.landing(s, S.O0, x);
     assert.deepStrictEqual(v, { y: null, void: true, primary: null, supports: [], warnings: ['void'] }, 'void at ' + x);
   }
@@ -106,7 +148,7 @@ function checkAssisted(ph, s, shape, cand, label) {
   const i1 = put(ph, 'I1', 10, 0);   // [10,11] x [0,4]
   const s = P.buildSurface(ph, {});
   const y = (id, x) => P.landing(s, S[id], x).y;
-  // hand-checked: skyline is 3 on [5,7], 1 on [7,9], 0 on [9,10], 4 on [10,11]
+  // hand-checked: skyline is 0 on [4.9,5], 3 on [5,7], 1 on [7,9], 0 on [9,10], 4 on [10,11], 0 on [11,11.1]
   assert.strictEqual(y('T0', 5), 3);
   assert.strictEqual(y('T0', 6.5), 3);
   assert.strictEqual(y('T0', 7), 1);
@@ -114,7 +156,7 @@ function checkAssisted(ph, s, shape, cand, label) {
   assert.strictEqual(y('T2', 7), 1);     // bottom [1,0,1]: the middle cell sits on the I0
   assert.strictEqual(y('T2', 8), 3);     // ...or the right arm hooks onto the I1 top
   assert.strictEqual(y('T2', 4), 3);
-  assert.strictEqual(y('J0', 4), 3);     // column [4,5] is void
+  assert.strictEqual(y('J0', 4), 3);     // column [4,5] only grazes the platform
   assert.strictEqual(y('J1', 8), 1);     // bottom [0,2]
   assert.strictEqual(y('J1', 9), 2);     // its top-right arm hooks onto the I1 top
   assert.strictEqual(y('J2', 5), 2);     // bottom [1,1,0]: top row rests on the O
@@ -129,7 +171,7 @@ function checkAssisted(ph, s, shape, cand, label) {
   assert.strictEqual(y('Z0', 6), 2);     // bottom [1,0,0]
 
   // brute force: exact interval maths over every shape and half-grid position
-  const boxes = [{ x0: 5, x1: 11, top: 0 }];
+  const boxes = [{ x0: PX0, x1: PX1, top: 0 }];
   for (const b of [i0, o0, i1]) {
     const p = b.body.getPosition();
     for (const [cx, cy] of b.cells) boxes.push({ x0: p.x + cx, x1: p.x + cx + 1, top: p.y + cy + 1 });
@@ -189,60 +231,124 @@ function checkAssisted(ph, s, shape, cand, label) {
   assert.deepStrictEqual(L.supports, [u1, u2, m], 'equal counts: higher top first, then lower id');
 }
 
-// ---- 4. Drifted support: assisted aligns to it, the bare platform stays half-grid -------
+// ---- 4. Drifted support: the half grid AND the block's corners -------------------------
 {
   const ph = TT.Physics.create();
-  const a = put(ph, 'O0', 7.27, 0);
+  const a = put(ph, 'O0', 7.27, 0);       // top corners at x = 7.27, 8.27, 9.27
   const s = P.buildSurface(ph, {});
-  const expectO = halfGrid(2).filter((x) => x <= 5 || x >= 9.5).concat([6.27, 7.27, 8.27]).sort((p, q) => p - q);
+  const expectO = halfGrid(2).concat([5.27, 6.27, 7.27, 8.27, 9.27], platformAligned(2)).sort((p, q) => p - q);
   nearList(Array.from(P.candidates(s, S.O0, 'assisted')), expectO, 1e-9, 'O0 drifted candidates');
+  // a T0 (3 wide): its left edge, both inner boundaries and its right edge on each corner...
+  const t = P.candidates(s, S.T0, 'assisted');
+  for (const c of [7.27, 8.27, 9.27]) {
+    for (let j = 0; j <= 3; j++) assert.ok(has(t, c - j), 'T0 boundary ' + j + ' on the corner at ' + c + ' (x = ' + (c - j).toFixed(2) + ')');
+  }
+  // ...and the half-block grid over the block as well (no more hidden half steps)
+  for (const g of [5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9]) assert.ok(has(t, g), 'T0 half grid over the block: ' + g);
+  assert.strictEqual(P.landing(s, S.T0, 7.5).primary, a, 'a half-grid spot that lands on the drifted block');
+  assert.strictEqual(P.landing(s, S.T0, 6.27).primary, a, 'an inner-boundary spot that lands on it');
   for (const id of ALL_SHAPES) {
     const shape = S[id];
     const cand = P.candidates(s, shape, 'assisted');
     checkAssisted(ph, s, shape, cand, id + ' drift');
-    let onA = 0;
-    for (const x of cand) {
-      const L = P.landing(s, shape, x);
-      if (L.primary === a) { onA++; near(frac(x), 0.27, 1e-6, id + ' frac over the drifted block'); }
-      else assert.ok(onHalf(x), id + ' half grid off the block: ' + x);
-    }
-    assert.ok(onA >= 2, id + ' has aligned spots on the drifted block');
+    assert.ok(cand.filter((x) => P.landing(s, shape, x).primary === a && Math.abs(frac(x) - 0.27) < 1e-6).length >= 1, id + ' has corner spots on the block');
+    assert.ok(cand.filter((x) => P.landing(s, shape, x).primary === a && onHalf(x)).length >= 1, id + ' has half-grid spots on the block');
     assert.deepStrictEqual(Array.from(P.candidates(s, shape, 'fixed')), halfGrid(shape.w), id + ' fixed ignores drift');
   }
   assert.strictEqual(P.candidates(s, S.O0, 'assisted'), P.candidates(s, S.O0, 'assisted'), 'cached per surface');
+  assert.ok(Object.isFrozen(P.candidates(s, S.O0, 'assisted')) && Object.isFrozen(P.candidates(s, S.O0, 'fixed')), 'frozen');
 
-  // a block that really drifted under physics (dynamic, at rest, touched)
+  // a block that really drifted under physics (dynamic, at rest, touched): its corners follow the body
   const ph2 = TT.Physics.create();
   const d = ph2.createBlock({ typeKey: 'normal', shapeId: 'I0' }, 6.13, 0.2);
   settle(ph2, 1);
   d.touched = true;
   const s2 = P.buildSurface(ph2, {});
-  const o = gridOffset(ph2, d);
-  near(frac(o), 0.13, 0.01, 'grid offset follows the body');
+  near(frac(d.body.getPosition().x), 0.13, 0.01, 'the body drifted');
   const cand2 = P.candidates(s2, S.T0, 'assisted');
   checkAssisted(ph2, s2, S.T0, cand2, 'physics drift');
-  const onD = cand2.filter((x) => P.landing(s2, S.T0, x).primary === d);
-  assert.ok(onD.length >= 4 && onD.every((x) => aligned(x, o, 1e-6)), 'T0 spots on the drifted I0: ' + onD);
-  // near-aligned half-grid spots fold into the exactly aligned one (no 1-pixel steps)
+  const want2 = alignedTo(refCorners(ph2, s2).slice(2), 3);
+  const onD = cand2.filter((x) => P.landing(s2, S.T0, x).primary === d && !onHalf(x) && want2.some((v) => Math.abs(v - x) < 1e-6));
+  assert.ok(onD.length >= 4 && onD.every((x) => Math.abs(frac(x) - 0.13) < 0.01), 'T0 corner spots on the drifted I0: ' + onD);
+}
+
+// ---- 4b. Merging: closer than CANDIDATE_MERGE is one spot ---------------------------------
+{
+  // a corner-aligned position replaces a half-grid one that close
+  const ph = TT.Physics.create();
+  put(ph, 'O0', 7.012, 0);
+  const c = P.candidates(P.buildSurface(ph, {}), S.O0, 'assisted');
+  for (const x of [5.012, 6.012, 7.012, 8.012, 9.012]) assert.ok(has(c, x), 'corner-aligned ' + x + ' kept: ' + c);
+  for (const x of [5, 6, 7, 8, 9]) assert.ok(!has(c, x), 'half grid ' + x + ' merged into ' + (x + 0.012));
+  assert.ok(has(c, 6.5) && has(c, 7.5) && has(c, 9.1), 'farther ones stay (9.1 is 0.088 from 9.012)');
+  for (let i = 1; i < c.length; i++) assert.ok(c[i] - c[i - 1] >= MERGE - 1e-9, 'merged spacing');
+  // the threshold: 0.07 merges, 0.1 does not
+  const ph2 = TT.Physics.create();
+  put(ph2, 'O0', 7.07, 0);
+  const c2 = P.candidates(P.buildSurface(ph2, {}), S.O0, 'assisted');
+  assert.ok(has(c2, 7.07) && !has(c2, 7) && has(c2, 7.5), '0.07 apart: one spot');
   const ph3 = TT.Physics.create();
-  put(ph3, 'O0', 7.012, 0);
+  put(ph3, 'O0', 7.1, 0);
   const c3 = P.candidates(P.buildSurface(ph3, {}), S.O0, 'assisted');
-  assert.ok(c3.some((x) => Math.abs(x - 7.012) < 1e-9) && !c3.includes(7), 'merged near-duplicate: ' + c3);
-  for (let i = 1; i < c3.length; i++) assert.ok(c3[i] - c3[i - 1] > C.ALIGN_EPS, 'merged spacing');
+  assert.ok(has(c3, 7.1) && has(c3, 7), '0.1 apart: two spots');
+
+  // near-duplicate corners of two blocks: the block the piece would land on wins
+  const ph4 = TT.Physics.create();
+  const A = put(ph4, 'O0', 5.5, 0), B = put(ph4, 'O0', 7.54, 0);   // A's right side and B's left side 0.04 apart
+  const s4 = P.buildSurface(ph4, {});
+  const c4 = P.candidates(s4, S.O0, 'assisted');
+  checkAssisted(ph4, s4, S.O0, c4, 'two blocks');
+  assert.ok(has(c4, 7.54) && !has(c4, 7.5), 'on B: flush with B (7.54), not with A\'s side (7.5)');
+  assert.strictEqual(P.landing(s4, S.O0, 7.54).primary, B);
+  assert.ok(has(c4, 5.5) && !has(c4, 5.54), 'on A: flush with A (5.5), not with B\'s side (5.54)');
+  assert.strictEqual(P.landing(s4, S.O0, 5.5).primary, A);
+  for (const x of [8.54, 9.54]) assert.ok(has(c4, x) && !has(c4, x - 0.04), 'B\'s corner ' + x + ' beats the half grid');
+
+  // a plank drifted 0.05 on a block: the plank's corners win, the covered ones below are merged
+  const ph5 = TT.Physics.create();
+  put(ph5, 'I0', 5, 0);
+  const plank = put(ph5, 'I0', 5.05, 1);
+  const s5 = P.buildSurface(ph5, {});
+  const c5 = P.candidates(s5, S.O0, 'assisted');
+  checkAssisted(ph5, s5, S.O0, c5, 'drifted plank');
+  for (const x of [4.05, 5.05, 6.05, 7.05]) {
+    assert.ok(has(c5, x) && !has(c5, x - 0.05), 'plank-aligned ' + x + ', not ' + (x - 0.05));
+    assert.strictEqual(P.landing(s5, S.O0, x).primary, plank);
+  }
+  assert.ok(has(c5, 3.05) && !has(c5, 3), 'beside the tower: the higher (visible) corner beats the covered one');
+  // a block buried under another one adds no corners
+  const ph6 = TT.Physics.create();
+  put(ph6, 'O0', 6.3, 0);
+  put(ph6, 'I0', 5.6, 2);                  // covers the O from 6.3 to 8.3 completely
+  const s6 = P.buildSurface(ph6, {});
+  const c6 = P.candidates(s6, S.O0, 'assisted');
+  checkAssisted(ph6, s6, S.O0, c6, 'buried block');
+  assert.ok(!c6.some((x) => Math.abs(frac(x) - 0.3) < 1e-6), 'no corners of the buried O: ' + c6);
+  for (const x of [3.6, 4.6, 5.6, 6.6, 7.6, 8.6, 9.6]) assert.ok(has(c6, x), 'plank corner spot ' + x);
 }
 
 // ---- 5. Tilted supports -------------------------------------------------------------------
 {
-  // more than ALIGN_MAX_TILT: half grid everywhere, even on top of it
+  // a clearly tilted block: the world x of its top corners, and the half grid on top of it too
   const ph = TT.Physics.create();
   const t = put(ph, 'I0', 6.13, 0.5, { angle: 0.3 });
   const s = P.buildSurface(ph, {});
+  // TL and TR of every (top-exposed) cell: [x, y]
+  const tops = ph.cellQuads(t).flatMap((q) => [[q.pts[6], q.pts[7]], [q.pts[4], q.pts[5]]]);
   for (const id of ['O0', 'T0', 'I0', 'P1']) {
     const cand = P.candidates(s, S[id], 'assisted');
-    assert.deepStrictEqual(Array.from(cand), halfGrid(S[id].w), id + ' tilted support -> half grid');
-    assert.ok(cand.some((x) => P.landing(s, S[id], x).primary === t), id + ' does land on the tilted block');
+    checkAssisted(ph, s, S[id], cand, id + ' tilted support');
+    assert.ok(cand.some((x) => onHalf(x) && P.landing(s, S[id], x).primary === t), id + ' half-grid spot on the tilted block');
+    const spots = cand.filter((x) => !onHalf(x) && P.landing(s, S[id], x).primary === t);
+    assert.ok(spots.length >= 2, id + ' corner spots on the tilted block: ' + spots);
   }
-  // the skyline follows the exact rotated top edge
+  // its corners are cos(0.3) apart, so spots on neighbouring corners merge: the higher corner wins
+  const o = P.candidates(s, S.O0, 'assisted');
+  const hi = tops.reduce((a, b) => (b[1] > a[1] ? b : a));
+  for (let j = 0; j <= 2; j++) assert.ok(has(o, hi[0] - j), 'O0 boundary ' + j + ' exactly on the highest corner ' + hi[0].toFixed(4));
+  for (const [cx] of tops) {
+    for (let j = 0; j <= 2; j++) assert.ok(o.some((x) => Math.abs(x + j - cx) < MERGE), 'O0 boundary ' + j + ' on (or merged near) the corner at ' + cx.toFixed(4));
+  }  // the skyline follows the exact rotated top edge
   const q = ph.cellQuads(t)[3];             // rightmost cell: its TR corner is the peak
   const peak = q.pts[5];
   let maxSky = -Infinity;
@@ -250,23 +356,40 @@ function checkAssisted(ph, s, shape, cand, label) {
   near(maxSky, peak, 0.35 / 32 + 1e-4, 'skyline peak');
   near(s.top, maxSky, 0, 'surface.top');
 
-  // a slight tilt (<= ALIGN_MAX_TILT) is still aligned to
+  // a slight tilt: its corners are slightly less than a cell apart, near-duplicates merge
   const ph2 = TT.Physics.create();
   const t2 = put(ph2, 'I0', 6.2, 0, { angle: 0.1 });
   const s2 = P.buildSurface(ph2, {});
-  const o = gridOffset(ph2, t2);
   const cand = P.candidates(s2, S.O0, 'assisted');
   checkAssisted(ph2, s2, S.O0, cand, 'slight tilt');
-  const onT = cand.filter((x) => P.landing(s2, S.O0, x).primary === t2);
-  assert.ok(onT.length >= 3 && onT.every((x) => aligned(x, o, 1e-6)), 'aligned to the slightly tilted block: ' + onT);
+  const tl = ph2.cellQuads(t2)[0].pts[6];                          // top-left corner of the left cell
+  const atTl = cand.filter((x) => Math.abs(x - tl) < MERGE && !onHalf(x));
+  assert.ok(atTl.length === 1 && P.landing(s2, S.O0, atTl[0]).primary === t2, 'one spot flush with its top-left corner area: ' + atTl);
+  assert.ok(Math.abs(atTl[0] - tl) < 0.02 && has(cand, 6), '...within 0.02 of it, and the grid spot 0.1 to the left stays');
+  const onT = cand.filter((x) => !onHalf(x) && P.landing(s2, S.O0, x).primary === t2);
+  assert.ok(onT.length >= 3, 'corner spots on the slightly tilted block: ' + onT);
 
-  // a block lying on its side (quarter turn) is flat again: aligned to its grid
+  // a block lying on its side (quarter turn): its world-top faces give the corners
   const ph3 = TT.Physics.create();
   const side = put(ph3, 'I1', 10.3, 0, { angle: Math.PI / 2 });   // covers [6.3, 10.3] x [0, 1]
   const s3 = P.buildSurface(ph3, {});
-  const onSide = P.candidates(s3, S.O0, 'assisted').filter((x) => P.landing(s3, S.O0, x).primary === side);
-  nearList(onSide, [5.3, 6.3, 7.3, 8.3, 9.3], 1e-9, 'quarter-turned block');
+  const c3 = P.candidates(s3, S.O0, 'assisted');
+  checkAssisted(ph3, s3, S.O0, c3, 'quarter turn');
+  nearList(c3.filter((x) => Math.abs(frac(x) - 0.3) < 1e-6), [4.3, 5.3, 6.3, 7.3, 8.3, 9.3, 10.3], 1e-9, 'quarter-turned block');
+  assert.strictEqual(P.landing(s3, S.O0, 7.3).primary, side);
   near(P.landing(s3, S.O0, 7.3).y, 1, 1e-6, 'lands on its side');
+  // upside down (half turn) and the other quarter turn: corners on the world-top faces too
+  for (const [id, angle, x0, want] of [['T0', Math.PI, 9.4, [6.4, 7.4, 8.4, 9.4]], ['J1', -Math.PI / 2, 6.6, [6.6, 7.6, 8.6, 9.6]]]) {
+    const ph4 = TT.Physics.create();
+    put(ph4, id, x0, 2, { angle });
+    const s4 = P.buildSurface(ph4, {});
+    const c4 = P.candidates(s4, S.O0, 'assisted');
+    checkAssisted(ph4, s4, S.O0, c4, id + ' turned ' + angle.toFixed(2));
+    const xs = refCorners(ph4, s4).slice(2).sort((p, q) => p - q);
+    nearList(xs.filter((x, i) => !i || x - xs[i - 1] > 1e-6), want, 1e-9, id + ' turned: reference top corners');
+    const f = frac(want[0]);
+    nearList(c4.filter((x) => Math.abs(frac(x) - f) < 1e-6), [want[0] - 2, want[0] - 1].concat(want), 1e-9, id + ' turned: corner spots');
+  }
 }
 
 // ---- 6. Exact upper envelope of a rotated block ----------------------------------------------
@@ -310,7 +433,7 @@ function checkAssisted(ph, s, shape, cand, label) {
     const flat = Math.abs(P.tiltOf(angle)) < 1e-3;
     for (let k = 0; k < s.n; k++) {
       const x = P.sampleX(k);
-      let want = (x > 5 && x < 11) ? 0 : -Infinity;
+      let want = (x > PX0 && x < PX1) ? 0 : -Infinity;
       for (const q of quads) want = Math.max(want, quadTop(q.pts, x));
       if (want === -Infinity) { assert.strictEqual(s.skyline[k], -Infinity, id + ' empty at ' + x); continue; }
       near(s.skyline[k], want, flat ? 2e-3 : 1e-4, id + ' angle ' + angle.toFixed(3) + ' at x ' + x.toFixed(4));
@@ -335,8 +458,20 @@ function checkAssisted(ph, s, shape, cand, label) {
   assert.deepStrictEqual(left, Array.from(cand).reverse());
   assert.strictEqual(P.stepX(s, S.O0, 'assisted', cand[cand.length - 1], +1, 0.05), cand[cand.length - 1]);
   assert.strictEqual(P.stepX(s, S.O0, 'assisted', cand[0], -1, 0.05), cand[0]);
-  near(P.stepX(s, S.O0, 'assisted', 5, +1), 6.27, 1e-9, 'assisted step onto the drifted block');
-  near(P.stepX(s, S.O0, 'assisted', 8.27, +1), 9.5, 1e-9, 'assisted step off it');
+  assert.ok(cand[0] === 0 && cand[cand.length - 1] === 14, 'the walk spans the field');
+  // the union in order: grid, platform edge, grid, block corners, grid...
+  let at = 4.5;
+  const seq = [];
+  for (let i = 0; i < 16; i++) seq.push(+(at = P.stepX(s, S.O0, 'assisted', at, +1)).toFixed(4));
+  assert.deepStrictEqual(seq, [4.9, 5, 5.27, 5.5, 6, 6.27, 6.5, 7, 7.27, 7.5, 8, 8.27, 8.5, 9, 9.1, 9.27], 'stepping right');
+  at = 9.5;
+  seq.length = 0;
+  for (let i = 0; i < 6; i++) seq.push(+(at = P.stepX(s, S.O0, 'assisted', at, -1)).toFixed(4));
+  assert.deepStrictEqual(seq, [9.27, 9.1, 9, 8.5, 8.27, 8], 'stepping left');
+  near(P.stepX(s, S.O0, 'assisted', 5, +1), 5.27, 1e-9, 'assisted step onto the drifted block\'s corner');
+  near(P.stepX(s, S.O0, 'assisted', 5.27, +1), 5.5, 1e-9, '...then the half grid');
+  near(P.stepX(s, S.O0, 'assisted', 5.29, -1), 5.27, 1e-9, 'a spot 0.02 away is the next step');
+  near(P.stepX(s, S.O0, 'assisted', 5.275, -1), 5, 1e-9, 'one within 0.01 is skipped');
   // fixed: half-block steps; "beyond" means by more than 0.01
   assert.strictEqual(P.stepX(s, S.O0, 'fixed', 7, +1), 7.5);
   assert.strictEqual(P.stepX(s, S.O0, 'fixed', 7.005, +1), 7.5);
@@ -349,8 +484,21 @@ function checkAssisted(ph, s, shape, cand, label) {
   assert.strictEqual(P.snapX(s, S.O0, 'fixed', 7.26), 7.5);
   assert.strictEqual(P.snapX(s, S.O0, 'fixed', -5), 0);
   assert.strictEqual(P.snapX(s, S.O0, 'fixed', 99), 14);
-  near(P.snapX(s, S.O0, 'assisted', 7.1), 7.27, 1e-9, 'assisted snap');
-  near(P.snapX(s, S.O0, 'assisted', 5.6), 5, 1e-9, 'assisted snap (0.6 vs 0.67)');
+  near(P.snapX(s, S.O0, 'assisted', 7.1), 7, 1e-9, 'assisted snap to the half grid');
+  near(P.snapX(s, S.O0, 'assisted', 7.2), 7.27, 1e-9, 'assisted snap to a corner');
+  near(P.snapX(s, S.O0, 'assisted', 5.6), 5.5, 1e-9, 'assisted snap over the block');
+  near(P.snapX(s, S.O0, 'assisted', 4.93), 4.9, 1e-9, 'assisted snap to the platform edge');
+  near(P.snapX(s, S.O0, 'assisted', 4.97), 5, 1e-9, '...or the grid next to it');
+  near(P.snapX(s, S.O0, 'assisted', -3), 0, 1e-12, 'assisted snap clamps');
+  near(P.snapX(s, S.O0, 'assisted', 30), 14, 1e-12);
+  // always the nearest candidate, the lower one on a tie
+  const rnd = TT.RNG.mulberry32(5);
+  for (let i = 0; i < 400; i++) {
+    const x = -1 + rnd() * 18;
+    let best = cand[0];
+    for (const c of cand) if (Math.abs(c - x) < Math.abs(best - x) - 1e-9) best = c;
+    assert.strictEqual(P.snapX(s, S.O0, 'assisted', x), best, 'nearest to ' + x);
+  }
   // manual: one pixel per step, clamped; snap = clamp
   near(P.stepX(s, S.O0, 'manual', 7, +1, 0.05), 7.05, 1e-12, 'manual right');
   near(P.stepX(s, S.O0, 'manual', 7, -1, 0.05), 6.95, 1e-12, 'manual left');
@@ -571,23 +719,49 @@ function checkAssisted(ph, s, shape, cand, label) {
   t0 = process.hrtime.bigint();
   for (let i = 0; i < N; i++) P.buildSurface(ph, {});
   const freshMs = Number(process.hrtime.bigint() - t0) / 1e6 / N;
-  // candidates for every shape on that surface (cache dropped each round)
-  t0 = process.hrtime.bigint();
-  const R = 20;
-  for (let r = 0; r < R; r++) {
-    s = P.buildSurface(ph, { reuse: s });
-    for (const id of ALL_SHAPES) P.candidates(s, S[id], 'assisted');
-  }
-  const candMs = (Number(process.hrtime.bigint() - t0) / 1e6 / R - reuseMs) / ALL_SHAPES.length;
+  // assisted candidates for every shape (the cache is dropped by each build): the first call
+  // after a build also collects the surface's corners
+  const R = 30;
+  const candTimes = () => {
+    let first = 0, all = 0;
+    for (let r = 0; r < R; r++) {
+      s = P.buildSurface(ph, { reuse: s });
+      const t1 = process.hrtime.bigint();
+      P.candidates(s, S.T0, 'assisted');
+      const t2 = process.hrtime.bigint();
+      for (const id of ALL_SHAPES) P.candidates(s, S[id], 'assisted');
+      first += Number(t2 - t1) / 1e6;
+      all += Number(process.hrtime.bigint() - t1) / 1e6;
+    }
+    return [first / R, all / R / ALL_SHAPES.length];
+  };
+  candTimes();                                                            // warm-up (JIT)
+  const [firstMs, candMs] = candTimes();
+  for (const id of ['O0', 'T0', 'I0', 'S1']) checkAssisted(ph, s, S[id], P.candidates(s, S[id], 'assisted'), '500-block tower ' + id);
   t0 = process.hrtime.bigint();
   let sink = 0;
   for (let i = 0; i < 20000; i++) sink += P.landing(s, S.T0, (i % 27) * 0.5).y || 0;
   const landUs = Number(process.hrtime.bigint() - t0) / 1e3 / 20000;
   assert.ok(sink > 0 && s.top > 300);
+  // worst case: a ragged top layer across the whole field (drifted, some tilted) owning the skyline
+  for (let i = 0; i < 12; i++) {
+    const b = ph.createBlock({ typeKey: 'normal', shapeId: ids[(i * 5) % ids.length] }, i * 1.31 + 0.037 * (i % 4), 401 + (i % 3) * 0.7,
+      { angle: i % 4 === 1 ? 0.08 : i % 4 === 3 ? -0.02 : 0 });
+    ph.makeStatic(b, 'petrified');
+  }
+  candTimes();
+  const [firstWide, candWide] = candTimes();
+  const owners = new Set(s.owner.filter((o) => o && !o.isPlatform)).size;
+  assert.ok(owners >= 10, 'the top layer owns the skyline (' + owners + ' blocks)');
+  for (const id of ['O0', 'T0', 'I0', 'S1']) checkAssisted(ph, s, S[id], P.candidates(s, S[id], 'assisted'), 'ragged top ' + id);
   console.log('  buildSurface, 500 blocks: ' + reuseMs.toFixed(3) + ' ms (reuse), ' + freshMs.toFixed(3) + ' ms (fresh); ' +
-    'assisted candidates ' + candMs.toFixed(3) + ' ms/shape; landing ' + landUs.toFixed(2) + ' us');
+    'assisted candidates ' + candMs.toFixed(3) + ' ms/shape (first after a build ' + firstMs.toFixed(3) + ' ms), ragged top of ' + owners +
+    ' blocks ' + candWide.toFixed(3) + ' ms/shape (first ' + firstWide.toFixed(3) + ' ms); landing ' + landUs.toFixed(2) + ' us');
   assert.ok(reuseMs < 2, 'buildSurface must stay well under 2 ms (got ' + reuseMs.toFixed(3) + ')');
   assert.ok(freshMs < 2, 'fresh buildSurface under 2 ms (got ' + freshMs.toFixed(3) + ')');
+  for (const [v, what] of [[candMs, 'per shape'], [firstMs, 'first after a build'], [candWide, 'ragged top, per shape'], [firstWide, 'ragged top, first']]) {
+    assert.ok(v < 0.5, 'assisted candidates well under 1 ms (' + what + ': ' + v.toFixed(3) + ' ms)');
+  }
 }
 
 console.log('placement ok');

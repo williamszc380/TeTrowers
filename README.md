@@ -33,15 +33,25 @@ no downloads, accounts or build step.
 
 1. Each round deals you **3 blocks**. They are shown at the bottom on portrait screens and on the
    right on wide screens. Place them in any order.
-2. Drag a block from the tray onto the playfield, aim it, and let go to drop it (or use the
-   keyboard). It falls onto the 6-wide platform (or onto your tower) and the physics takes over.
-   Blocks are **never rotated**, and all 19 tetromino orientations are equally likely.
-3. Your score is the **best height** your tower reaches. You have 3 lives. When the last one is gone
+2. Drag a block from the tray onto the playfield (or drag on the playfield to take the block that
+   is already selected), aim it, and let go to drop it (or use the keyboard). It glides down onto
+   the platform, which is a little over 6 blocks wide (6.2), or onto your tower, and the physics
+   takes over. **Every block is a tetromino**, special blocks included: there are no single-cell
+   blocks. Blocks are **never rotated**, and all 19 tetromino orientations are equally likely.
+3. **Dropped blocks have no weight.** They glide down at a steady speed, slow down just above the
+   spot where they will land and touch down softly, so setting a block down never jolts your tower.
+   Once a block touches something it has its normal weight and settles like everything else. The one
+   exception is the **Anvil**, a bad block that falls with its full weight and hits hard.
+4. Your score is the **best height** your tower reaches. You have 3 lives. When the last one is gone
    the run is over.
 
 **Cold** colours (white, green, blue, indigo) are good blocks. **Warm** colours (red, orange,
 amber, black) are bad blocks. The first time a new special block appears, a short note explains
 it. All of them are listed under *How to Play → Block codex* in the game.
+
+Help is also there during a run: a special block in the tray has a small **?** on its top corner
+that explains that block, and the **?** button in the top corner of the screen opens the special
+block explorer, where you can look through every special block.
 
 The **Good** and **Bad** figures on screen are the current odds that a block you are dealt is a
 good or a bad special block. Tap them (or press <kbd>O</kbd>) to see the odds of every block and
@@ -53,22 +63,29 @@ Touch and the mouse work exactly the same way, on the phone and on the PC.
 
 | Action | Touch or mouse | Keyboard |
 |---|---|---|
-| Drop a block | Drag it from the tray onto the playfield and let go | <kbd>Space</kbd> or <kbd>Enter</kbd> |
+| Drop a block | Drag it from the tray onto the playfield, or drag on the playfield, and let go over the playfield | <kbd>Space</kbd> or <kbd>Enter</kbd> |
 | Aim | While you drag, the block follows your finger or the mouse | <kbd>←</kbd> <kbd>→</kbd> (hold to repeat) |
-| Cancel | Drag the block back into the tray and let go | |
+| Cancel | Drag back into the tray (it turns red) and let go | |
 | Switch block | Tap or click a block in the tray | <kbd>↓</kbd> next block, <kbd>↑</kbd> previous block, or <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> |
 | Placement mode | Mode button | <kbd>Ctrl</kbd> (cycles assisted → fixed → manual) |
 | Pause | Pause button | <kbd>Esc</kbd> or <kbd>P</kbd> |
 | Block odds | Tap or click the Good / Bad odds | <kbd>O</kbd> |
+| Special block help | The small **?** on a special block in the tray, or the **?** button in the top corner | <kbd>?</kbd> or <kbd>H</kbd> |
 | Sound on/off | Settings | <kbd>M</kbd> |
 
-**Dragging is the only way to drop with touch or the mouse.** Pick a block up in the tray (the
-bottom of a portrait screen, the right-hand sidebar on a wide one) and move it over the playfield:
-the hovering block follows your finger or the mouse sideways, with the landing outline showing
-where it will end up. Let go over the playfield and it drops. Drag it back into the tray, or let go
-anywhere that is not the playfield, and nothing drops: the block stays in its slot. A tap or click
-on a block only selects it, and a drag that starts on the playfield only moves the block, it never
-drops it.
+**Any drag that ends over the playfield drops the block.** Pick a block up in the tray (the bottom
+of a portrait screen, the right-hand sidebar on a wide one), or drag on the playfield to take the
+block that is already selected, and move it over the playfield: the hovering block follows your
+finger or the mouse sideways, with the landing outline showing where it will end up. Let go over
+the playfield and it drops.
+
+**To cancel, drag back into the tray.** As soon as the drag leaves the playfield, the tray turns
+red with a dashed border and a big **✕ Release to cancel**, the block shows up back in its slot,
+the hovering block on the playfield is greyed out and crossed with a red ✕ (its landing outline
+disappears), a line marks the edge of the playfield, and phones give a short buzz. Let go there (or
+anywhere else that is not the playfield) and nothing drops: a soft sound and *Cancelled* confirm it.
+Drag back over the playfield and everything is normal again at once. A tap or click never drops:
+on a block in the tray it selects it, on the playfield it does nothing.
 
 If you let go while the previous block is still settling, the block waits and drops as soon as it
 is allowed (*Dropping when ready* appears next to it, with a bar that fills up). A new drag, picking
@@ -83,7 +100,7 @@ straight away. Opening the block odds during play pauses the game until you clos
 
 | Mode | How it moves |
 |---|---|
-| **Assisted** (default) | Steps between the spots where the block will sit flush with the block it lands on, even when the tower has drifted a little. Over empty space, the bare platform or a steeply tilted block it uses half-block steps. While falling, the block follows its target, so a support that shifts slightly can't make it clip a corner and miss. |
+| **Assisted** (default) | Half-block steps, plus every spot where an edge of the block lines up with a corner of the blocks below it (or an edge of the platform), so you can always set it flush, even when the tower has drifted a little. While falling, the block follows its target, so a support that shifts slightly can't make it clip a corner and miss. |
 | **Fixed** | Half-block steps. No help while falling. |
 | **Manual** | Pixel-precise. A key tap moves one pixel, holding slides faster and faster, and a dragged block goes exactly where your finger or the mouse points. No help while falling. |
 
@@ -93,12 +110,14 @@ The starting mode can be set in *Settings*.
 
 - **Batches.** 3 blocks per round. The next round is dealt once all three are down and the drop is
   ready again.
-- **Dropping.** The next drop is allowed once the previous block has settled, 1.2 s after it first
-  touched something, or once it is gone. The longest wait is 4 s and the shortest 0.3 s.
+- **Dropping.** A dropped block glides down weightlessly (7 m/s, easing to under 1 m/s for the last
+  1.5 m) and lands softly; only the heavy bad blocks, Anvil and Rubber, fall with their full weight. The next drop is allowed once
+  the previous block has settled, 1.2 s after it first touched something, or once it is gone. The
+  longest wait is 4 s and the shortest 0.3 s (longer while blocks are still falling off the tower).
 - **Turns and lives.** A turn runs from one drop to the next. The first block that falls off the
   tower during a turn costs a life (or uses up your shield); further losses in the same turn are
-  free. Blocks that are swallowed, blown up, melted or destroyed by spikes don't cost lives. You
-  have 3 lives at most.
+  free. Blocks that are swallowed, blown up, melted, destroyed by spikes or smashed by an anvil
+  don't cost lives. You have 3 lives at most.
 - **Milestones.** Every time your best height passes a multiple of **8 m**, you get a life back
   (up to 3). A dashed line on the playfield marks the next milestone.
 - **Height.** The current height is the top of your highest settled block. The best height (your
@@ -124,20 +143,24 @@ The starting mode can be set in *Settings*.
 | Crystal Heart | good (blue) | 4 m | Settle it safely to restore a life. At full lives it gives a shield instead. |
 | Magnet | good (indigo) | 6 m | When it settles it pulls nearby blocks straight and snaps them onto its grid. |
 | Frost | good (ice blue) | 8 m | When it settles it freezes itself and every block it touches solid. |
-| Pebble | bad (rust red) | start | Just one tiny cell. |
-| Crumble | bad (orange) | start | Falls apart into single cells the moment it lands. |
-| Rubber | bad (amber) | 3 m | Bouncy. It bounces when it lands, and so does anything dropped on it. |
+| Rubber | bad (amber) | start | Bouncy and heavy: it drops with full weight and bounces when it lands. |
 | Oil Slick | bad (black) | 6 m | Frictionless. It slides, and anything on it slides too. |
-| Ruby Glass | bad (ruby red) | 8 m | Looks solid, but shatters into loose cells the first time a block lands on it. |
+| Ruby Glass | bad (ruby red) | 8 m | Looks solid, but shatters away the first time a block lands on it. |
 | Mine | bad (red) | 10 m | Arms when it settles. Explodes when a block lands on top of it. |
 | Magma | bad (orange) | 15 m | Melts away 3 drops after it settles. Do not lean on it. |
 | Spikes | bad (dark crimson) | 18 m | Its top is spiked: any block that lands on it is destroyed. Build beside it, never on it. |
-| Anvil | bad (black) | 20 m | Very heavy. Shatters the blocks it lands on into single cells. |
+| Anvil | bad (black) | 20 m | Very heavy. Smashes the blocks it lands on to dust. |
 | Black Hole | bad (black) | 25 m | Swallows any block that touches its sides. Build on top, never beside. |
 
-Plain grey **Stone** blocks are the normal ones. **Rubble** is the loose single cells left behind
-when a block shatters. A shield (from a Crystal Heart at full lives) absorbs the next life you
-would lose. A block destroyed by spikes is gone but costs no life.
+The Anvil is the only block with weight while it drops: it falls fast and lands hard (your phone
+buzzes), where every other block glides down and sets down softly.
+
+Plain grey **Stone** blocks are the normal ones. Every block, normal or special, is a tetromino:
+nothing in the game is ever a single cell, and nothing breaks into single cells either. When Ruby
+Glass shatters, the glass is gone and the block on top falls into the gap (frozen glass is immune);
+a block smashed by an anvil is gone too. A shield (from a Crystal Heart at full lives) absorbs the
+next life you would lose. A block destroyed by spikes or smashed by an anvil is gone but costs no
+life.
 
 **Choosing the block set.** *Special Blocks* in the main menu turns each special block on or off
 (all are on by default, with *All on* / *All off* shortcuts). If a disabled block would have been
@@ -252,7 +275,8 @@ reload. On GitHub Pages it serves from its cache first, which makes start-up fas
   **`js/blocktypes.js`**. The odds shown in the game are computed from the same numbers
   (`typeOdds` in `js/generator.js`), so they always match what is dealt.
 - **Balancing:** `npm run sim -- --runs 8` (or `node tools/sim.js --runs 8`) plays complete runs
-  headlessly with a heuristic bot (real physics, real rules) and reports how long they last.
+  headlessly with a heuristic bot (real physics, real rules) and reports how long they last and how
+  long the next drop takes to be ready after each drop.
   `--set KEY=VALUE,...` tries config overrides without editing files. See the top of
   `tools/sim.js` for all options.
 - **Debug overlay:** add `?debug=1` to the URL to see FPS, block counts and frame timings.
@@ -266,7 +290,7 @@ css/style.css           layout (portrait: tray at the bottom, wide: sidebar on t
 js/lib/planck.min.js    planck.js 1.5.0 physics engine (MIT, see js/lib/LICENSE.txt)
 js/config.js            every tunable number, and VERSION
 js/util.js, rng.js      helpers; seeded randomness
-js/shapes.js            the 19 tetromino orientations and the 1x1 pebble
+js/shapes.js            the 19 tetromino orientations (plus a 1x1 probe used only by tests and tools)
 js/blocktypes.js        block catalogue: names, rules text, colours, physics, unlock heights
 js/generator.js         seeded block generator and odds by height
 js/physics.js           physics world, platform, blocks, exact geometry

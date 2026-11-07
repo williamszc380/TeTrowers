@@ -3,12 +3,15 @@
  * AltGr), a mode change while an arrow is held never replays a backlog of steps, Down / Up pick the
  * next / previous unused block (wrapping) and never drop, Space / Enter / NumpadEnter drop unless a
  * control has keyboard focus, a text field has the keys or the game is not live.
- * Pointer (touch and mouse alike): a block dragged out of the tray drops exactly once when let go over
- * the playfield, where the pointer is; back over the tray, or let go anywhere else, nothing drops; a
- * tap only selects; a drag that starts on the playfield never drops; a drop let go too early waits
- * until it is allowed and is cancelled by a new drag, selection, key move, pause or menu; cancel,
- * lost capture and blur cancel; extra fingers are ignored; moves are applied once per frame; no hover
- * aim, wheel or right-click controls. */
+ * Pointer (touch and mouse alike): a block dragged out of the tray, or the selected block dragged on
+ * the playfield, drops exactly once when let go over the playfield, where the pointer is; in the
+ * cancel zone (tray, HUD, outside the window) the cue says so, the piece is back where it was picked
+ * up and letting go drops nothing (counted in cue.cancels); a tap never drops (a slot tap selects, a
+ * playfield tap does nothing); a drop let go too early waits until it is allowed and is cancelled by
+ * a new drag, selection, key move, pause or menu; pause mid-drag, pointercancel, lost capture and
+ * blur cancel quietly; extra fingers are ignored; moves are applied once per frame; no hover aim,
+ * wheel or right-click controls. The "?" badge on a block is not the slot: a press there never
+ * selects, lifts, drops or cancels anything; ? and H open the special-block explorer. */
 'use strict';
 const assert = require('assert');
 const path = require('path');
@@ -265,6 +268,35 @@ function waitReady(game) {
   assert.strictEqual(game.turn, t + 1, 'Enter after clicking a button drops');
 }
 
+// --- ? and H open the special-block explorer (once per press, only in play) ------------------------
+{
+  for (const k of Object.keys(listeners)) delete listeners[k];
+  const game = TT.Game.create({ seed: 'INPUT', mode: 'assisted' });
+  game.update(1 / 60);
+  let blocked = false, helps = 0, odds = 0;
+  TT.Input.create({ getGame: () => game, isBlocked: () => blocked, onHelp: () => { helps++; }, onOdds: () => { odds++; } });
+  assert.strictEqual(TT.Input.keyAction({ key: '?', code: 'Slash', shiftKey: true }), 'help');
+  assert.strictEqual(TT.Input.keyAction({ key: 'h', code: 'KeyH' }), 'help');
+  assert.strictEqual(TT.Input.keyAction({ key: 'H', code: 'KeyH', shiftKey: true }), 'help');
+  const ev = down('?', 'Slash', { shiftKey: true });
+  up('?', 'Slash');
+  assert.ok(ev.defaultPrevented && helps === 1, '? opens the explorer');
+  down('h', 'KeyH');
+  down('h', 'KeyH', { repeat: true });
+  up('h', 'KeyH');
+  assert.strictEqual(helps, 2, 'H too, once per press');
+  const ctrl = down('h', 'KeyH', { ctrlKey: true });
+  assert.ok(!ctrl.defaultPrevented && helps === 2, 'Ctrl+H belongs to the browser');
+  down('h', 'KeyH', { target: { tagName: 'INPUT', type: 'text' } });
+  blocked = true;
+  down('?', 'Slash', { shiftKey: true });
+  blocked = false;
+  assert.strictEqual(helps, 2, 'not while typing or with a menu open (ui.js has the keys there)');
+  down('o', 'KeyO');
+  assert.ok(odds === 1 && helps === 2, 'O still opens the odds');
+  assert.strictEqual(game.turn, 0, 'nothing dropped');
+}
+
 // --- Pointer: a fake page ---------------------------------------------------------------------
 // A portrait phone, 400 x 806 CSS px: HUD bar y < 56, playfield (canvas) y 56..656, tray below it
 // with three slots at y 700..790 (slot i: x 10 + 130 i .. 130 + 130 i, centre 70 + 130 i). 25 CSS
@@ -288,17 +320,26 @@ function makePage() {
     btn.inner = { name: 'slot-canvas' + i, inTray: true, closest: (sel) => btn.closest(sel) };   // what a press hits
     return btn;
   });
+  // Each slot's "?" badge (a button of its own beside the slot): 40 px over its top-right corner,
+  // x x1 - 36 .. x1 + 4, y 696..736
+  const badges = slots.map((s, i) => {
+    const b = { name: 'help' + i, inTray: true, dataset: { help: String(i) }, x0: s.x1 - 36, x1: s.x1 + 4 };
+    b.closest = (sel) => (sel === '[data-help]' ? b : null);
+    b.inner = { name: 'help-dot' + i, inTray: true, closest: (sel) => b.closest(sel) };   // the dot itself
+    return b;
+  });
   const tray = Object.assign(target('tray'), { name: 'tray', inTray: true, contains: (n) => !!n && !!n.inTray });
   const hud = node('hud'), trayBg = node('tray-desc', true);
   document.elementFromPoint = (x, y) => {
     if (!(x >= 0 && x < 400 && y >= 0 && y < 806)) return null;   // outside the window
     if (y < 56) return hud;
     if (y < 656) return canvas;
+    if (y >= 696 && y < 736) for (const b of badges) if (x >= b.x0 && x < b.x1) return b.inner;
     if (y >= 700 && y < 790) for (const s of slots) if (x >= s.x0 && x < s.x1) return s.inner;
     return trayBg;
   };
   const renderer = { scale: 25, screenToWorld: (px, py, o) => { o.x = px / 25; o.y = (600 - py) / 25; return o; } };
-  return { canvas, tray, slots, renderer };
+  return { canvas, tray, slots, badges, renderer };
 }
 
 function setupPointer(mode) {
@@ -404,6 +445,73 @@ for (const type of ['touch', 'mouse']) {
   assert.strictEqual(s.denies(), 0);
 }
 
+// --- The "?" badge on a block is not the slot: never a pick, a drag, a drop or a cancel ---------------
+const BADGE_Y = 712;
+const badgeX = (i) => 116 + 130 * i;
+for (const type of ['touch', 'mouse']) {
+  const s = setupPointer();
+  const { game, input, drops, page } = s;
+  let selects = 0;
+  game.on('select', () => selects++);
+  const p = pointer(type);
+  const x0 = game.piece.x;
+  const what = type + ': ';
+  const e = p.down(badgeX(2), BADGE_Y);              // a tap on the "?" of block 3
+  assert.strictEqual(e.target.name, 'help-dot2', 'the press lands on the badge');
+  assert.ok(!input.isActive() && !input.isPressing(), what + 'not a press of ours (ui.js opens the card on its click)');
+  s.frame();
+  p.up(badgeX(2), BADGE_Y);
+  s.frame(3);
+  assert.ok(game.selected === 0 && selects === 0, what + 'the badge never selects its block');
+  // Pressed there, dragged out over the playfield and let go: nothing in hand, nothing drops
+  p.down(badgeX(1), BADGE_Y);
+  glide(s, p, badgeX(1), BADGE_Y, 200, 300, 6);
+  assert.deepStrictEqual([input.cue.slot, input.cue.zone], [-1, ''], what + 'nothing lifted');
+  assert.strictEqual(game.piece.x, x0, what + 'nothing aimed');
+  p.up(200, 300);
+  // ...or dragged around the tray and let go there: no cancel cue either
+  p.down(badgeX(0), BADGE_Y);
+  glide(s, p, badgeX(0), BADGE_Y, slotX(1), SLOT_Y, 4);
+  p.up(slotX(1), SLOT_Y);
+  s.frame(5);
+  assert.ok(drops.n === 0 && game.turn === 0 && game.piece.x === x0 && selects === 0, what + 'nothing dropped, moved or picked');
+  assert.strictEqual(input.cue.cancels, 0, what + 'no "Cancelled"');
+  let prevented = false;
+  fire('tray', 'contextmenu', { target: page.badges[1].inner, preventDefault() { prevented = true; } });
+  assert.ok(prevented, what + 'no context menu on a long press');
+  // The slot itself still works as before
+  p.down(slotX(1), SLOT_Y);
+  p.up(slotX(1), SLOT_Y);
+  assert.ok(game.selected === 1 && selects === 1, what + 'a tap on the slot selects');
+}
+{
+  // A second finger on a badge while a block is dragged: the drag goes on (and isPressing tells
+  // ui.js to ignore the badge's click)
+  const s = setupPointer();
+  const a = pointer('touch'), b = pointer('touch');
+  dragOut(s, a, 0, 175, 300);
+  assert.ok(s.input.isPressing() && s.input.cue.slot === 0);
+  b.down(badgeX(2), BADGE_Y);
+  b.up(badgeX(2), BADGE_Y);
+  s.frame();
+  assert.ok(s.input.cue.slot === 0 && s.input.cue.zone === 'field', 'the drag goes on');
+  a.up(175, 300);
+  assert.ok(s.drops.n === 1 && s.game.batch[0].used && !s.input.isPressing(), 'and drops where it was let go');
+  // A mouse press whose release never reached us is over when the next press is on a badge
+  const s2 = setupPointer();
+  const m = pointer('mouse');
+  const home = s2.game.piece.x;
+  dragOut(s2, m, 0, 175, 300);
+  assert.strictEqual(s2.input.cue.slot, 0);
+  m.down(badgeX(1), BADGE_Y);
+  assert.deepStrictEqual([s2.input.cue.slot, s2.input.cue.zone], [-1, ''], 'the stale drag ends quietly');
+  assert.strictEqual(s2.game.piece.x, home, 'the block is back where it was picked up');
+  glide(s2, m, badgeX(1), BADGE_Y, 250, 300, 4);
+  m.up(250, 300);
+  s2.frame(5);
+  assert.ok(s2.drops.n === 0 && s2.input.cue.cancels === 0 && s2.game.piece.x === home, 'nothing drops');
+}
+
 // --- Dragged back into the tray, or let go outside the playfield: nothing drops --------------------
 for (const type of ['touch', 'mouse']) {
   const ends = [
@@ -425,14 +533,18 @@ for (const type of ['touch', 'mouse']) {
     assert.ok(Math.abs(game.piece.x - home) > 1, type + ': aimed away from its spot');
     glide(s, p, 100, 300, x, y, 6);
     assert.strictEqual(input.cue.zone, 'cancel', type + ' ' + where + ': cancel cue');
+    assert.strictEqual(input.cue.slot, 0, type + ' ' + where + ': still in hand');
     assert.strictEqual(game.piece.x, home, type + ' ' + where + ': the piece shows it going back');
+    assert.strictEqual(input.cue.cancels, 0, 'not cancelled before it is let go');
     p.up(x, y);
+    assert.strictEqual(input.cue.cancels, 1, type + ' ' + where + ': counted as a cancel (sound, "Cancelled")');
+    assert.deepStrictEqual([input.cue.slot, input.cue.zone, input.cue.queued], [-1, '', false], type + ' ' + where + ': cue reset');
     s.frame(5);
     assert.strictEqual(drops.n, 0, type + ' let go ' + where + ': no drop');
     assert.strictEqual(game.turn, 0);
     assert.ok(!game.batch[0].used && game.selected === 0, type + ' ' + where + ': the block stays in its slot');
     assert.strictEqual(game.piece.x, home, type + ' ' + where + ': ...where it was picked up');
-    assert.strictEqual(input.cue.slot, -1);
+    assert.strictEqual(input.cue.cancels, 1, 'once');
   }
   // Back over the tray and out again: it follows again, and drops
   const s = setupPointer();
@@ -443,6 +555,26 @@ for (const type of ['touch', 'mouse']) {
   assert.ok(s.input.cue.zone === 'field' && Math.abs(centre(s.game) - 8) <= 0.5, type + ': follows again');
   p.up(200, 300);
   assert.strictEqual(s.drops.n, 1, type + ': changed its mind twice, then dropped');
+  assert.strictEqual(s.input.cue.cancels, 0, type + ': a drop is not a cancel');
+}
+
+// --- The cue switches at once, every frame, as the drag crosses between the zones -----------------
+{
+  const s = setupPointer();
+  const { input } = s;
+  const p = pointer('touch');
+  const zones = [];
+  dragOut(s, p, 2, 200, 300);
+  // to and fro across the edge of the playfield (y 656), one frame per move
+  for (const y of [600, 640, 650, 662, 700, 640, 300, 760, 655, 657]) {
+    p.move(200, y);
+    s.frame();
+    zones.push(input.cue.zone);
+  }
+  assert.deepStrictEqual(zones, ['field', 'field', 'field', 'cancel', 'cancel', 'field', 'field', 'cancel', 'field', 'cancel']);
+  assert.strictEqual(input.cue.slot, 2, 'the block stays in hand throughout');
+  p.up(200, 657);
+  assert.ok(input.cue.zone === '' && input.cue.cancels === 1 && s.drops.n === 0, 'let go just past the edge: cancelled');
 }
 
 // --- A tap (or a press that barely moves) on a slot selects it and never drops ----------------------
@@ -476,32 +608,86 @@ for (const type of ['touch', 'mouse']) {
   assert.strictEqual(drops.n, 1, type + ': a drag from a used slot never drops');
 }
 
-// --- A drag that starts on the playfield moves the piece and never drops ---------------------------
+// --- A drag on the playfield takes the selected block: left or right, let go there, one drop ---------
+for (const type of ['touch', 'mouse']) {
+  for (const [dir, x1] of [['right', 300], ['left', 75]]) {
+    const s = setupPointer();
+    const { game, input, drops, dropped } = s;
+    const p = pointer(type);
+    p.down(slotX(2), SLOT_Y);                       // preselect block 3 with a tap
+    p.up(slotX(2), SLOT_Y);
+    assert.strictEqual(game.selected, 2);
+    const what = type + ' ' + dir + ': ';
+    p.down(200, 300);
+    s.frame();
+    assert.ok(input.cue.slot === -1 && input.cue.zone === '', what + 'a press alone is not a drag');
+    glide(s, p, 200, 300, x1, 320, 6);
+    assert.strictEqual(input.cue.slot, 2, what + 'the selected block is in hand');
+    assert.strictEqual(input.cue.zone, 'field');
+    assert.ok(Math.abs(centre(game) - x1 / 25) <= 0.5, what + 'it follows the pointer, centre ' + centre(game));
+    assert.strictEqual(drops.n, 0, what + 'nothing drops while dragging');
+    p.up(x1, 320);
+    assert.strictEqual(drops.n, 1, what + 'let go over the playfield drops');
+    assert.ok(game.batch[2].used && game.turn === 1, what + 'the preselected block');
+    const b = dropped[0].block;
+    assert.ok(Math.abs(b.body.getPosition().x + b.shape.w / 2 - x1 / 25) <= 0.5, what + 'dropped under the pointer');
+    assert.deepStrictEqual([input.cue.slot, input.cue.zone, input.cue.cancels], [-1, '', 0], what + 'cue cleared');
+    s.frame(30);
+    assert.strictEqual(drops.n, 1, what + 'exactly once');
+    assert.strictEqual(s.denies(), 0);
+  }
+}
+
+// --- A tap or click on the playfield does nothing; a playfield drag into the cancel zone cancels -----
 for (const type of ['touch', 'mouse']) {
   const s = setupPointer();
   const { game, input, drops } = s;
   const p = pointer(type);
   const x0 = game.piece.x;
-  p.down(200, 300);
-  glide(s, p, 200, 300, 300, 300, 5);             // +4 cells
-  assert.ok(Math.abs(game.piece.x - (x0 + 4)) <= 0.5, type + ': moved with the drag, x ' + game.piece.x);
-  assert.strictEqual(input.cue.slot, -1, type + ': nothing is lifted from the tray');
+  p.down(300, 300);
   p.up(300, 300);
-  glide(s, p, 300, 300, 300, 300, 1);
-  // Any direction, speed and length; ending over the tray or outside too
-  for (const [x1, y1] of [[200, 600], [300, 100], [100, 760], [200, -50], [205, 302]]) {
-    p.down(200, 300);
-    p.move((200 + x1) / 2, (300 + y1) / 2);
-    p.move(x1, y1);
-    s.frame();
-    p.up(x1, y1);
-  }
-  // A plain click or tap on the playfield
-  p.down(200, 300);
-  p.up(200, 300);
+  p.down(100, 400);
+  p.move(103, 404);                                 // 5 px of jitter: still a tap
+  s.frame();
+  p.up(103, 404);
   s.frame(5);
-  assert.strictEqual(drops.n, 0, type + ': playfield presses never drop');
-  assert.strictEqual(game.turn, 0);
+  assert.ok(drops.n === 0 && game.turn === 0, type + ': a playfield tap never drops');
+  assert.strictEqual(game.piece.x, x0, type + ': ...and does not move the block');
+  assert.strictEqual(input.cue.cancels, 0, type + ': a tap is not a cancelled drag');
+  for (const [where, x, y] of [['the tray', 200, 745], ['the HUD bar', 200, 20], ['outside the window', 200, -40]]) {
+    p.down(200, 300);
+    glide(s, p, 200, 300, 350, 300, 4);
+    assert.ok(Math.abs(centre(game) - 14) <= 0.5, type + ': aimed');
+    glide(s, p, 350, 300, x, y, 4);
+    assert.strictEqual(input.cue.zone, 'cancel', type + ' over ' + where + ': cancel cue');
+    assert.strictEqual(game.piece.x, x0, type + ' over ' + where + ': back where it was');
+    const n = input.cue.cancels;
+    p.up(x, y);
+    s.frame(5);
+    assert.strictEqual(input.cue.cancels, n + 1, type + ' let go over ' + where + ': cancelled');
+    assert.ok(drops.n === 0 && game.piece.x === x0, type + ' let go over ' + where + ': nothing dropped, nothing moved');
+  }
+}
+
+// --- No block in play (the next batch is on its way): a playfield drag does nothing ------------------
+{
+  const s = setupPointer();
+  const { game, input, drops } = s;
+  for (let i = 0; i < 3; i++) { waitReady(game); game.drop(); }
+  assert.ok(!game.piece && game.selected === -1, 'every block of the batch is down');
+  const p = pointer('touch');
+  p.down(200, 300);
+  glide(s, p, 200, 300, 300, 300, 4);
+  assert.ok(input.cue.slot === -1 && input.cue.zone === '', 'nothing in hand');
+  p.up(300, 300);
+  assert.ok(drops.n === 3 && input.cue.cancels === 0, 'no drop, no cancel');
+  for (let i = 0; i < 900 && !game.piece; i++) s.frame();
+  assert.ok(game.piece && game.round === 2, 'the next batch');
+  waitReady(game);
+  p.down(200, 300);
+  glide(s, p, 200, 300, 120, 300, 4);
+  p.up(120, 300);
+  assert.strictEqual(drops.n, 4, 'then a playfield drag drops again');
 }
 
 // --- Too early: the drop waits until it is allowed, then fires exactly once -------------------------
@@ -537,7 +723,7 @@ for (const type of ['touch', 'mouse']) {
     'a new drag from the tray': (s) => { const q = pointer('touch'); q.down(slotX(2), SLOT_Y); glide(s, q, slotX(2), SLOT_Y, slotX(2), 680, 3); q.up(slotX(2), 680); },
     'a tap on a slot': (s) => { const q = pointer('mouse'); q.down(slotX(2), SLOT_Y); q.up(slotX(2), SLOT_Y); },
     'a tap on the same slot': (s) => { const q = pointer('touch'); q.down(slotX(1), SLOT_Y); q.up(slotX(1), SLOT_Y); },
-    'a drag on the playfield': (s) => { const q = pointer('touch'); q.down(200, 200); glide(s, q, 200, 200, 120, 200, 3); q.up(120, 200); },
+    'a drag on the playfield let go over the tray': (s) => { const q = pointer('touch'); q.down(200, 200); glide(s, q, 200, 200, 120, 745, 3); q.up(120, 745); },
     'Down': () => { down('ArrowDown', 'ArrowDown'); up('ArrowDown', 'ArrowDown'); },
     'Up': () => { down('ArrowUp', 'ArrowUp'); up('ArrowUp', 'ArrowUp'); },
     'a key move': () => { down('ArrowLeft', 'ArrowLeft'); up('ArrowLeft', 'ArrowLeft'); },
@@ -573,6 +759,23 @@ for (const type of ['touch', 'mouse']) {
   p.up(200, 200);
   s.frame(600);
   assert.strictEqual(s.game.turn, 2, 'a tap on the playfield keeps the waiting drop');
+  // A playfield drag let go over the playfield takes the waiting block up again: it waits anew,
+  // where it was let go this time, and drops once
+  const s2 = setupPointer();
+  dragOut(s2, p, 0, 175, 300);
+  p.up(175, 300);
+  dragOut(s2, p, 1, 250, 300);
+  p.up(250, 300);
+  p.down(240, 200);
+  glide(s2, p, 240, 200, 100, 220, 4);
+  assert.ok(!s2.input.cue.queued && s2.input.cue.slot === 1, 'in hand again: no longer waiting');
+  const aimed = s2.game.piece.x;
+  p.up(100, 220);
+  assert.ok(s2.input.cue.queued && s2.game.turn === 1, 'waiting again');
+  s2.frame(600);
+  assert.strictEqual(s2.game.turn, 2, 'then it drops');
+  assert.ok(s2.game.batch[1].used && s2.drops.n === 2, 'once');
+  assert.ok(Math.abs(s2.dropped[1].x - aimed) <= 0.5, 'where it was let go the second time');
 }
 {
   // The last block of a batch waits: Down / Up have nothing to switch to and still cancel
@@ -629,11 +832,15 @@ for (const type of ['touch', 'mouse']) {
     const home = s.game.piece.x;
     dragOut(s, p, 0, 150, 300);
     end(s, p);
-    if (!drops0) assert.strictEqual(s.game.piece.x, home, name + ': the piece is back where it was picked up');
+    if (!drops0) {
+      assert.strictEqual(s.game.piece.x, home, name + ': the piece is back where it was picked up');
+      assert.deepStrictEqual([s.input.cue.slot, s.input.cue.zone], [-1, ''], name + ': cue cleared at once');
+    }
     p.up(150, 300);                                    // whatever comes after is ignored
     s.frame(5);
     assert.strictEqual(s.drops.n, drops0, name);
     assert.strictEqual(s.input.cue.slot, -1, name + ': cue cleared');
+    assert.strictEqual(s.input.cue.cancels, 0, name + ': not a drag let go in the cancel zone (no sound)');
   };
   run('pointercancel', (s, p) => p.cancel(150, 300), 0);
   run('lost capture', (s, p) => fire('tray', 'lostpointercapture', { pointerId: p.id, target: s.page.slots[0] }), 0);
@@ -644,6 +851,32 @@ for (const type of ['touch', 'mouse']) {
   run('capture handed to the slot', (s, p) => fire('tray', 'lostpointercapture', { pointerId: p.id, target: s.page.slots[0].inner }), 1);
   // Another pointer's capture changes are not ours
   run('another pointer lost capture', (s, p) => fire('tray', 'lostpointercapture', { pointerId: p.id + 1000, target: s.page.slots[0] }), 1);
+}
+
+// --- Pause (or a menu) during a drag ends it: cue reset at once, nothing drops ----------------------
+for (const [what, interrupt, back] of [
+  ['pause', (s) => s.game.pause(), (s) => s.game.resume()],
+  ['a menu', (s) => s.block(true), (s) => s.block(false)]
+]) {
+  for (const zone of ['field', 'cancel']) {
+    const s = setupPointer();
+    const { game, input, drops } = s;
+    const p = pointer('touch');
+    dragOut(s, p, 1, 300, 300);
+    if (zone === 'cancel') glide(s, p, 300, 300, 300, 760, 3);
+    assert.strictEqual(input.cue.zone, zone);
+    interrupt(s);
+    s.frame();
+    assert.deepStrictEqual([input.cue.slot, input.cue.zone, input.cue.queued], [-1, '', false], what + ' over ' + zone + ': cue reset');
+    assert.ok(!input.isActive(), what + ': the gesture is over');
+    back(s);
+    glide(s, p, 300, 760, 200, 300, 3);
+    assert.strictEqual(input.cue.zone, '', what + ': moving on does not pick it up again');
+    p.up(200, 300);
+    s.frame(5);
+    assert.ok(drops.n === 0 && game.turn === 0 && !game.batch[1].used, what + ': nothing dropped');
+    assert.strictEqual(input.cue.cancels, 0, what + ': a quiet cancel');
+  }
 }
 
 // --- Multi-touch: extra fingers are ignored while a drag is on ---------------------------------

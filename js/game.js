@@ -6,8 +6,12 @@
  * read its fields and listen to its events (see docs/ARCHITECTURE.md §4); they never
  * mutate it except through the public methods.
  *
+ * Dropped blocks have no weight until they first touch something: they glide down at
+ * GLIDE_SPEED and ease off to SOFT_LAND_SPEED just above their predicted landing, so a
+ * landing never jolts the tower. Heavy types (the anvil) fall with full gravity instead.
+ *
  * Frame order (update):
- *   physics substeps (falling-block guidance before each, contact processing after each)
+ *   physics substeps (falling-block glide + guidance before each, contact processing after each)
  *   -> effects timers -> settle/fall/lost/petrify tracking -> height & milestones
  *   -> drop readiness -> batch dealing -> hover line -> placement surface & ghost
  */
@@ -22,6 +26,9 @@
   const OVER_SIM_TIME = 6;       // s the world keeps simulating behind the game-over screen
   const FALL_END_TIME = (C.FALL_END_TIME != null ? C.FALL_END_TIME : 0.5);   // s calm (speed <= UNSETTLE_SPEED) that end a fall
   const READY_FALL_MAX = (C.READY_FALL_MAX != null ? C.READY_FALL_MAX : 10); // s after a drop: ready even while blocks still fall
+  const SOFT_LAND_MISS = (C.SOFT_LAND_MISS != null ? C.SOFT_LAND_MISS : 0.5); // m below the predicted landing: it was wrong, predict again
+  const SOFT_LAND_IMPACT = (C.SOFT_LAND_IMPACT != null ? C.SOFT_LAND_IMPACT : 2.5); // m/s; least impact a soft landing reports
+  const GLIDE_KICK = 0.25;       // m/s; a glide speed changed by more than this was a blast: weight back on
 
   class Game {
     constructor(options) {
@@ -77,6 +84,7 @@
       this._staticTopVersion = -1;
       this._petrifyTimer = 0;
       this._scratch = [];
+      this._vel = { x: 0, y: 0 };
       this._hooks = {
         beforeSubstep: () => this._beforeSubstep(),
         afterSubstep: () => this._afterSubstep()
@@ -132,8 +140,9 @@
       this.canDrop = this._ready && !!this.piece && this.state === 'playing' && !this.ending;
     }
 
-    // Before every substep: cap the falling speed of dropped-but-not-landed blocks and
-    // apply the assisted-mode guided fall (track the target support if it drifts).
+    // Before every substep, for dropped-but-not-landed blocks: the weightless glide (or, for
+    // heavy blocks, the fall speed cap) and the assisted-mode guided fall (track the target
+    // support if it drifts).
     _beforeSubstep() {
       const movers = this.physics.movers;
       for (let i = 0; i < movers.length; i++) {
@@ -142,7 +151,8 @@
         const body = b.body;
         const v = body.getLinearVelocity();
         let vx = v.x, vy = v.y, changed = false;
-        if (vy < -C.MAX_FALL_SPEED) { vy = -C.MAX_FALL_SPEED; changed = true; }
+        // Nothing but a blast changes a glide between substeps: let it fly with its weight
+        if (b.gliding && Math.abs(vy - b.glideVy) > GLIDE_KICK) this._release(b);
         const g = b.guide;
         if (g) {
           const sb = g.block.dead ? null : g.block.body;
@@ -152,6 +162,7 @@
             // none) and fall straight down from here
             b.guide = null;
             vx = 0;
+            if (b.gliding) this._predictLanding(b); // its landing went with the support
           } else {
             // Feed-forward of the landing spot's own velocity, plus a pull toward it
             vx = clamp(sb.getLinearVelocityFromWorldPoint(want).x + (want.x - body.getPosition().x) * C.GUIDE_GAIN,
@@ -159,8 +170,45 @@
           }
           changed = true;
         }
-        if (changed) body.setLinearVelocity({ x: vx, y: vy });
+        if (b.gliding) { vy = b.glideVy = -this._glideSpeed(b); changed = true; }
+        else if (vy < -C.MAX_FALL_SPEED) { vy = -C.MAX_FALL_SPEED; changed = true; }
+        if (changed) {
+          const out = this._vel;
+          out.x = vx; out.y = vy;
+          body.setLinearVelocity(out);
+        }
       }
+    }
+
+    // Weightless descent: GLIDE_SPEED, easing linearly to SOFT_LAND_SPEED over the last
+    // SOFT_LAND_DIST above the predicted landing (b.landY, origin y; null = none known).
+    _glideSpeed(b) {
+      const y = b.body.getPosition().y;
+      // Passed it without touching, or its support is gone: predict again from here
+      if (b.landY != null && (y - b.landY < -SOFT_LAND_MISS || (b.landOn && b.landOn.dead))) this._predictLanding(b);
+      if (b.landY == null) return C.GLIDE_SPEED;
+      const d = y - b.landY;
+      if (d >= C.SOFT_LAND_DIST) return C.GLIDE_SPEED;
+      if (d <= 0) return C.SOFT_LAND_SPEED;
+      return C.SOFT_LAND_SPEED + (C.GLIDE_SPEED - C.SOFT_LAND_SPEED) * d / C.SOFT_LAND_DIST;
+    }
+
+    // Where a falling block lands from where it is now: b.landY (origin y) and b.landOn (the
+    // support), both null for the void or a "support" that is not below it
+    _predictLanding(b) {
+      const p = b.body.getPosition();
+      const L = TT.Placement.landing(this._getSurface(true), b.shape, p.x);
+      const ok = !L.void && L.y <= p.y + 0.1;
+      b.landY = ok ? L.y : null;
+      b.landOn = ok ? L.primary : null;
+    }
+
+    // Weight back on (first touch, lost, game over): from here it falls and settles like
+    // every other block
+    _release(b) {
+      if (!b.gliding) return;
+      b.gliding = false;
+      if (!b.dead) b.body.setGravityScale(1);
     }
 
     // After every substep: the world is unlocked, so contact consequences happen here.
@@ -181,8 +229,12 @@
       b.touched = true;
       b.touchTime = this.physics.time;
       b.guide = null;
+      const soft = b.gliding;
+      this._release(b);
       const bb = this.physics.bounds(b);
-      this.emit('land', { block: b, x: (bb.minX + bb.maxX) / 2, y: bb.minY, impact: Math.hypot(b.lastVel.x, b.lastVel.y) });
+      let impact = Math.hypot(b.lastVel.x, b.lastVel.y);
+      if (soft) impact = Math.max(impact, SOFT_LAND_IMPACT); // a gentle touchdown, but still heard
+      this.emit('land', { block: b, x: (bb.minX + bb.maxX) / 2, y: bb.minY, impact });
       TT.Effects.onFirstTouch(this, b, rec);
     }
 
@@ -274,6 +326,7 @@
       const x = clamp(cx, -1, C.FIELD_WIDTH + 1);
       const y = Math.max(bb.maxY, C.LOST_Y);
       this.emit('blockLost', { block: b, x, y });
+      this._release(b);
       this.physics.removeBlock(b, 'lost');
       this.stats.lost++;
       // One life per turn, however many blocks fall because of it: a fall counts for the
@@ -304,6 +357,9 @@
       this.ghost = null;
       this.selected = -1;
       this.canDrop = false;
+      // The collapse plays out with real weight
+      const movers = this.physics.movers;
+      for (let i = 0; i < movers.length; i++) this._release(movers[i]);
     }
 
     _updateHeight() {
@@ -405,6 +461,13 @@
 
     _rebuildSurface() {
       const P = this.physics;
+      // Assisted: carry the piece along with its support's drift since the last snapshot, so the
+      // re-snap that follows keeps it flush with that support, not a neighbouring half-grid spot
+      const p = this.piece;
+      if (p && this.mode === 'assisted' && this._surface) {
+        const t = TT.Placement.guideTarget(this._surface, p.shape, p.x);
+        if (t && !t.block.dead) p.x = TT.Placement.clampX(p.shape, t.block.body.getWorldPoint(t.local).x);
+      }
       this._exclude.clear();
       const ld = this._lastDropped;
       if (ld && !ld.dead && !ld.touched) this._exclude.add(ld);
@@ -528,10 +591,10 @@
       TT.Effects.onTurnStart(this); // e.g. magma melts — before the new body exists
 
       let guide = null;
+      const surface = this._getSurface(true);
       if (this.mode === 'assisted') {
         // x was chosen against a surface up to SURFACE_INTERVAL old: re-snap it onto the fresh
         // one first, so the guide starts from where a drifting support is now
-        const surface = this._getSurface(true);
         piece.x = TT.Placement.snapX(surface, piece.shape, this.mode, piece.x);
         const g = TT.Placement.guideTarget(surface, piece.shape, piece.x);
         if (g && g.block && !g.block.dead) {
@@ -540,11 +603,19 @@
       }
       const x = piece.x;
       const y = this.hoverY;
-      const block = this.physics.createBlock(piece.spec, x, y, { vy: -C.DROP_START_SPEED });
+      // Weightless glide toward the predicted landing; heavy blocks fall with full weight
+      const glide = !piece.type.heavy;
+      const L = glide ? TT.Placement.landing(surface, piece.shape, x) : null;
+      const block = this.physics.createBlock(piece.spec, x, y, { vy: glide ? -C.GLIDE_SPEED : -C.DROP_START_SPEED });
       block.dropped = true;
       block.dropTime = this.physics.time;
       block.dropTurn = this.turn;
       block.guide = guide;
+      block.gliding = glide;
+      block.glideVy = -C.GLIDE_SPEED;
+      block.landY = L && !L.void ? L.y : null;
+      block.landOn = L && !L.void ? L.primary : null;
+      if (glide) block.body.setGravityScale(0);
       this._lastDropped = block;
       this._ready = false;
       this.canDrop = false;

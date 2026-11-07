@@ -201,6 +201,20 @@ kbd {
   transition: background 0.12s;
 }
 .pill:hover, .icon-btn:hover { background: rgba(255, 255, 255, 0.11); }
+/* "?" in the top corner, beside pause: the special-block explorer. The portrait row (lives, height,
+   mode, ?, pause) is kept compact so the height still fits beside a shield on narrow phones. */
+.help-btn { width: 38px; color: var(--accent); }
+.help-btn .icon { width: 22px; height: 22px; }
+.hud-top { gap: 8px; }
+.hud-top .mode-btn { min-width: 84px; padding: 0 12px; }
+.hud-height-now, .hud-height-best { overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 400px) {
+  .hud-top { gap: 6px; }
+  .heart { width: 22px; height: 22px; }
+  .hud-height-now { font-size: 19px; }
+  .hud-top .mode-btn { min-width: 0; padding: 0 10px; font-size: 13px; }
+  .help-btn { width: 36px; }
+}
 
 /* ---- HUD: batch tray (portrait) ----------------------------------------------------------- */
 .hud-tray {
@@ -251,14 +265,39 @@ kbd {
   color: var(--muted);
   text-align: center;
 }
-.hud-tray.is-dragging .tray-cue, .hud-tray.is-cancel .tray-cue { display: flex; }
-.hud-tray.is-dragging .hud-desc, .hud-tray.is-cancel .hud-desc { visibility: hidden; }
-/* Over the tray (or anywhere that is not the playfield) letting go cancels: say so loudly */
+.hud-tray.is-dragging .tray-cue, .hud-tray.is-cancel .tray-cue, .hud-tray.is-cancelled .tray-cue { display: flex; }
+.hud-tray.is-dragging .hud-desc, .hud-tray.is-cancel .hud-desc, .hud-tray.is-cancelled .hud-desc { visibility: hidden; }
+/* Over the tray (or anywhere that is not the playfield) letting go cancels: an unmistakable red
+   target, with the block back in its slot. It switches instantly as the drag crosses the edge. */
+.app.is-dragging .hud-tray, .app.is-dragging .slot { transition: none; }
 .hud-tray.is-cancel {
-  background: #1b2850;
-  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55), 0 -2px 12px rgba(0, 0, 0, 0.3);
+  background: #3a1520;
+  outline: 3px dashed #ff5a4c;
+  outline-offset: -6px;
+  box-shadow: inset 0 0 26px rgba(255, 64, 48, 0.35), 0 -2px 12px rgba(0, 0, 0, 0.3);
 }
-.hud-tray.is-cancel .tray-cue { color: #ffffff; font-size: 15px; font-weight: 800; letter-spacing: 0.02em; }
+.hud-tray.is-cancel .tray-cue { color: #ffe3de; font-size: 20px; font-weight: 850; line-height: 1.15; white-space: nowrap; }
+/* ...and once let go there, "Cancelled" for a moment */
+.hud-tray.is-cancelled .tray-cue { color: #ffb4a8; font-size: 16px; font-weight: 800; animation: cancelled-in 0.15s ease-out; }
+
+/* While a block is in hand, a line marks the edge of the playfield next to the tray (the sidebar
+   on wide screens): letting go beyond it cancels. Subtle over the playfield, red beyond it. */
+.stage::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  display: none;
+  height: 2px;
+  background: rgba(142, 227, 255, 0.5);
+  pointer-events: none;
+}
+.app.is-dragging .stage::after { display: block; }
+.app.is-drag-cancel .stage::after { height: 4px; background: #ff4a3d; box-shadow: 0 0 14px 2px rgba(255, 74, 61, 0.7); }
+/* The portrait odds chip floats over the playfield: a dragged block passes through it */
+.app.is-dragging .odds-chip { pointer-events: none; opacity: 0.35; }
 
 /* Three equal slots across the tray: big, easy-to-grab targets */
 .slots {
@@ -314,7 +353,7 @@ kbd {
   box-shadow: none;
 }
 .slot.is-lifted .slot-canvas { opacity: 0.3; }
-.hud-tray.is-cancel .slot.is-lifted { border-color: #ffffff; background: rgba(255, 255, 255, 0.1); }
+.hud-tray.is-cancel .slot.is-lifted { border-style: solid; border-color: #ff8a7d; background: rgba(255, 90, 76, 0.16); }
 .hud-tray.is-cancel .slot.is-lifted .slot-canvas { opacity: 1; }
 .slot-canvas { display: block; flex: none; width: calc(var(--slot) - 28px); height: calc(var(--slot) - 28px); }
 .slot-text { display: flex; flex-direction: column; align-items: center; min-width: 0; max-width: 100%; }
@@ -330,6 +369,46 @@ kbd {
 .slot.cat-negative .slot-name { color: var(--warm); }
 .slot-cat { display: none; }
 .slot-key { position: absolute; top: 4px; left: 4px; min-width: 18px; height: 18px; font-size: 10px; opacity: 0.75; }
+
+/* Each slot sits in a cell with its "?" badge (special blocks only): a small dot in the top-right
+   corner, cold for good blocks and warm for bad ones, on a 40 px touch target that reaches a little
+   past the corner. It is a button of its own: pressing it never picks the block up. */
+.slot-cell { position: relative; display: flex; min-width: 0; }
+.slot-cell > .slot { flex: 1 1 0; min-width: 0; }
+.slot-help {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  z-index: 1;
+  display: grid;
+  place-items: start end;
+  width: 40px;
+  height: 40px;
+  padding: 7px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: #ffffff;
+}
+.help-dot {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--cold-2);
+  box-shadow: 0 0 0 2px var(--panel), 0 2px 6px rgba(0, 0, 0, 0.45);
+  font: 900 13px/20px var(--font);
+  text-align: center;
+  transition: transform 0.1s, filter 0.1s;
+}
+.slot-help.cat-negative .help-dot { background: var(--warm-2); }
+.slot-help:active .help-dot { transform: scale(0.9); }
+@media (hover: hover) {
+  .slot-help:hover .help-dot { transform: scale(1.12); filter: brightness(1.15); }
+}
+.slot-help:focus-visible { outline-offset: -2px; }
+/* While a block is in hand the badges step back (and let the drag pass through) */
+.app.is-dragging .slot-help { opacity: 0.3; pointer-events: none; }
 
 .tray-actions { display: flex; align-items: center; gap: 10px; }
 
@@ -376,16 +455,18 @@ kbd {
 
   .hud-top {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas: "lives pause" "height height" "odds odds" "mile mile";
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "lives help pause" "height height height" "odds odds odds" "mile mile mile";
     align-items: center;
     row-gap: 8px;
+    column-gap: 8px;
     height: auto;
     padding: calc(14px + var(--safe-t)) calc(14px + var(--safe-r)) 10px 16px;
     border-bottom: 0;
     box-shadow: none;
   }
   .hud-lives { grid-area: lives; }
+  .help-btn { grid-area: help; width: 44px; }
   .pause-btn { grid-area: pause; }
   .hud-height { grid-area: height; flex-direction: row; align-items: baseline; justify-content: space-between; gap: 10px; }
   .hud-height-now { font-size: 30px; }
@@ -407,7 +488,10 @@ kbd {
     box-shadow: none;
     scrollbar-width: thin;
   }
-  .hud-tray.is-cancel { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55); }
+  .hud-tray.is-cancel { box-shadow: inset 0 0 26px rgba(255, 64, 48, 0.35); }
+  .hud-tray.is-cancel .tray-cue { font-size: 18px; }
+  .stage::after { top: 0; left: auto; width: 2px; height: auto; }
+  .app.is-drag-cancel .stage::after { width: 4px; height: auto; }
   .slots { order: 1; grid-template-columns: minmax(0, 1fr); gap: 8px; width: auto; }
   .tray-info { order: 2; flex: none; }
   .hud-desc { height: 4.05em; -webkit-line-clamp: 3; line-clamp: 3; text-align: left; }
@@ -496,6 +580,7 @@ kbd {
   .heart { width: 20px; height: 20px; }
   .hud-height-now { font-size: 18px; }
   .pill { min-width: 80px; padding: 0 10px; font-size: 13px; }
+  .help-btn { width: 34px; }
 }
 
 /* ---- Block odds: markers, stacked bar, wide sidebar button, portrait chip ------------------- */
@@ -605,6 +690,11 @@ kbd {
 .hud-keys dt { display: flex; gap: 3px; }
 .hud-keys dd { margin: 0; }
 .hud-keys .keys-drop { grid-column: span 2; }
+/* A row of its own: only where the sidebar has room for it (the "?" button's tooltip names the keys) */
+.hud-keys .keys-help { display: none; grid-column: 1 / -1; }
+@media (min-height: 760px) {
+  .hud-keys .keys-help { display: flex; }
+}
 
 .hud-drag { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12.5px; line-height: 1.35; color: var(--muted); }
 .hud-drag .icon { width: 26px; height: 26px; fill: var(--accent); color: var(--accent); }
@@ -913,6 +1003,84 @@ label.type-row:hover { background: rgba(255, 255, 255, 0.035); }
   .odds-body { grid-template-columns: 1fr 1fr; }
 }
 
+/* ---- Special-block explorer and block cards -------------------------------------------------- */
+.explore-body { display: grid; gap: 12px; align-items: start; margin-top: 12px; }
+.explore-list { margin: 0; padding: 0; list-style: none; }
+.explore-list li + li { border-top: 1px solid var(--line); }
+.explore-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  width: 100%;
+  margin: 2px 0;
+  padding: 8px 6px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: left;
+  transition: background 0.12s;
+}
+@media (hover: hover) {
+  .explore-row:hover { background: rgba(255, 255, 255, 0.045); }
+}
+.explore-row:active { background: rgba(255, 255, 255, 0.07); }
+/* The block whose card was opened last */
+.explore-row.is-current { background: rgba(143, 208, 255, 0.11); box-shadow: inset 0 0 0 1px rgba(143, 208, 255, 0.45); }
+.explore-row.cat-negative.is-current { background: rgba(255, 163, 107, 0.11); box-shadow: inset 0 0 0 1px rgba(255, 163, 107, 0.45); }
+.explore-canvas { display: block; width: 46px; height: 46px; }
+.explore-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.explore-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.explore-name { min-width: 0; font-size: 15px; font-weight: 750; }
+.explore-row.cat-positive .explore-name { color: var(--cold); }
+.explore-row.cat-negative .explore-name { color: var(--warm); }
+.explore-val { flex: none; font-size: 14px; font-weight: 750; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.explore-desc { color: var(--muted); }
+.explore-unlock { font-size: 11.5px; color: var(--dim); }
+.explore-row.is-locked .explore-val, .explore-row.is-off .explore-val { font-size: 12.5px; font-weight: 500; color: var(--dim); }
+.explore-row.is-locked .explore-canvas, .explore-row.is-off .explore-canvas { opacity: 0.45; }
+.explore-row.is-locked .explore-unlock { display: none; }   /* its odds already say "unlocks at N m" */
+.explore-close { margin-top: 14px; }
+@media (min-width: 700px) {
+  .explore-body { grid-template-columns: 1fr 1fr; }
+}
+
+.info-panel { text-align: center; }
+.info-canvas { display: block; width: 156px; height: 112px; margin: 2px auto 8px; }
+.info-cat {
+  display: table;
+  margin: 0 auto;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.info-panel.cat-positive .info-cat { background: rgba(59, 130, 246, 0.24); color: var(--cold); }
+.info-panel.cat-negative .info-cat { background: rgba(226, 96, 60, 0.24); color: var(--warm); }
+.info-name { margin: 8px 0 0; font-size: 26px; line-height: 1.15; }
+.info-panel.cat-positive .info-name { color: var(--cold); }
+.info-panel.cat-negative .info-name { color: var(--warm); }
+.info-desc { margin: 8px 0 0; font-size: 15px; color: #d8e0f2; }
+.info-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 14px 0 0; }
+.info-facts div { padding: 8px 6px; border-radius: 12px; background: rgba(255, 255, 255, 0.04); }
+.info-facts dt { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.info-facts dd { margin: 2px 0 0; font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.info-facts dd.is-dim { font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--muted); }
+.info-panel .menu { gap: 6px; margin-top: 10px; }
+/* Short screens (phones in landscape): a smaller preview, the buttons side by side */
+@media (max-height: 500px) {
+  .info-canvas { width: 120px; height: 70px; margin-bottom: 4px; }
+  .info-name { margin-top: 4px; font-size: 22px; }
+  .info-facts { margin-top: 10px; }
+  .info-panel .menu { flex-direction: row; }
+}
+
 /* ---- Switches & segmented control -------------------------------------------------------- */
 .switch {
   -webkit-appearance: none;
@@ -1210,6 +1378,7 @@ label.type-row:hover { background: rgba(255, 255, 255, 0.035); }
   100% { transform: none; opacity: 1; }
 }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes cancelled-in { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: none; } }
 @keyframes badge-in { 0% { transform: scale(0.6); opacity: 0; } 70% { transform: scale(1.08); opacity: 1; } 100% { transform: none; } }
 @keyframes hit {
   0%, 100% { transform: none; }

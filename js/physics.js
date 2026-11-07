@@ -103,7 +103,7 @@
     }
 
     // spec: { typeKey, shapeId, n? }. (x, y) = world position of the piece's local origin
-    // (its min cell corner). opts: { angle, vx, vy, w, look, cracked, tint }
+    // (its min cell corner). opts: { angle, vx, vy, w }
     createBlock(spec, x, y, opts) {
       this._assertUnlocked('createBlock');
       const o = opts || {};
@@ -128,9 +128,8 @@
         shapeId: shape.id,
         shape,
         cells: shape.cells,
-        look: o.look || spec.typeKey,                  // visual style key (rubble keeps its origin's)
-        tint: o.tint || (spec.typeKey === 'normal' ? TT.NORMAL_TINTS[shape.family] : null),
-        cracked: !!o.cracked,
+        look: spec.typeKey,                            // visual style key
+        tint: (spec.typeKey === 'normal' && TT.NORMAL_TINTS[shape.family]) || null,
         body,
         isPlatform: false,
         dropped: false, dropTime: -1, dropTurn: -1,
@@ -198,39 +197,6 @@
         out.push(block.body.createFixture(poly, { isSensor: true, density: 0, userData: { block, kind: 'sensor', tag } }));
       }
       return out;
-    }
-
-    // Break a block into 1x1 'rubble' blocks that keep its exact pose and motion.
-    // Static blocks are immune unless force is set. Returns the new blocks.
-    shatter(block, force) {
-      if (!block || block.dead || block.isPlatform) return [];
-      if (block.body.isStatic() && !force) return [];
-      if (block.cells.length <= 1 && block.typeKey === 'rubble') return [block];
-      this._assertUnlocked('shatter');
-      const body = block.body;
-      const angle = body.getAngle();
-      const v = body.getLinearVelocity();
-      const w = body.isStatic() ? 0 : body.getAngularVelocity();
-      const wc = body.getWorldCenter();
-      const vx0 = body.isStatic() ? 0 : v.x, vy0 = body.isStatic() ? 0 : v.y;
-      const parts = [];
-      const poses = block.cells.map(([cx, cy]) => ({
-        o: body.getWorldPoint({ x: cx, y: cy }),
-        c: body.getWorldPoint({ x: cx + 0.5, y: cy + 0.5 })
-      }));
-      const look = block.look, tint = block.tint, n = block.n, dropTurn = block.dropTurn;
-      this.removeBlock(block, 'shattered');
-      for (const { o, c } of poses) {
-        const part = this.createBlock({ typeKey: 'rubble', shapeId: 'P1', n }, o.x, o.y, {
-          angle, w, look, tint, cracked: true,
-          vx: vx0 - w * (c.y - wc.y),
-          vy: vy0 + w * (c.x - wc.x)
-        });
-        part.dropped = true; part.touched = true; part.activated = true; part.dropTurn = dropTurn;
-        part.touchTime = this.time; part.dropTime = this.time;
-        parts.push(part);
-      }
-      return parts;
     }
 
     // Advance by a frame's dt using fixed substeps. hooks: { beforeSubstep(h), afterSubstep(h) }

@@ -6,12 +6,12 @@
   'use strict';
 
   TT.CONFIG = Object.freeze({
-    VERSION: '1.1.0',         // keep in sync with VERSION in sw.js (installed copies update on change)
+    VERSION: '1.2.0',         // keep in sync with VERSION in sw.js (installed copies update on change)
 
     // ---- Field -------------------------------------------------------------
     FIELD_WIDTH: 16,          // blocks may be dropped with x in [0, FIELD_WIDTH]
-    PLATFORM_X0: 5,           // initial platform spans x in [5, 11] (6 wide, centred)
-    PLATFORM_X1: 11,
+    PLATFORM_X0: 4.9,         // initial platform spans x in [4.9, 11.1] (6.2 wide, centred)
+    PLATFORM_X1: 11.1,
     PLATFORM_TOP: 0,          // platform top surface y
     PLATFORM_DEPTH: 6,        // collision depth of the platform pillar
     LOST_Y: -2,               // a block whose highest point drops below this is lost
@@ -29,7 +29,7 @@
     RESTITUTION: 0,
     LINEAR_DAMPING: 0,
     ANGULAR_DAMPING: 0.3,       // tipped blocks settle instead of rolling off the tower
-    MAX_FALL_SPEED: 9,        // terminal velocity of a falling (not yet landed) block
+    MAX_FALL_SPEED: 9,        // terminal velocity of a falling heavy block (anvil) before it lands
 
     // Forgiving collision geometry (visuals stay exactly 1x1 per cell)
     CELL_INSET: 0.02,         // outer left/right faces are inset by this much per side
@@ -40,7 +40,10 @@
     MIN_HOVER_Y: 5,
     HOVER_RISE_SPEED: 8,      // cells/s the hover line eases upward
     HOVER_FALL_SPEED: 4,      // cells/s it eases downward (after collapses)
-    DROP_START_SPEED: 2,      // initial downward speed given on release
+    DROP_START_SPEED: 2,      // initial downward speed given on release (heavy blocks only)
+    GLIDE_SPEED: 7,           // dropped blocks glide down at this constant speed: no weight, no acceleration
+    SOFT_LAND_DIST: 1.5,      // ...and start easing off this far above their predicted landing
+    SOFT_LAND_SPEED: 0.8,     // touchdown speed, so landing does not jolt the tower
 
     // ---- Placement modes ------------------------------------------------------
     MODES: ['assisted', 'fixed', 'manual'],

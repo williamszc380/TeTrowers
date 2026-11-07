@@ -35,11 +35,12 @@
     <symbol id="i-dice" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8.5" cy="8.5" r="1.6"/><circle cx="15.5" cy="15.5" r="1.6"/><circle cx="15.5" cy="8.5" r="1.6"/><circle cx="8.5" cy="15.5" r="1.6"/><circle cx="12" cy="12" r="1.6"/></symbol>
     <!-- A block dragged out of the tray toward the playfield (the drag hint in the wide sidebar) -->
     <symbol id="i-drag" viewBox="0 0 24 24"><rect x="14" y="4.5" width="7" height="7" rx="1.4"/><rect x="14" y="12.5" width="7" height="7" rx="1.4"/><path d="M11 12H3.5M7 8.5L3.5 12 7 15.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><path d="M8.6 8.9a3.5 3.5 0 1 1 5.1 3.1c-1.1.6-1.7 1.4-1.7 2.6v.6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="19.2" r="1.6"/></symbol>
   </svg>
 
   <div id="app" class="app no-game">
     <main id="stage" class="stage">
-      <canvas id="game-canvas" class="game-canvas" aria-label="Playfield: drag a block here from the tray and let go to drop it"></canvas>
+      <canvas id="game-canvas" class="game-canvas" aria-label="Playfield: drag a block here from the tray, or drag on it, and let go to drop the block"></canvas>
       <div id="drop-cue" class="drop-cue" role="status" hidden><span class="cue-text">Dropping when ready</span><span class="cue-bar" aria-hidden="true"><i></i></span></div>
     </main>
 
@@ -61,11 +62,13 @@
       </button>
       <p class="hud-milestone wide-only" id="hud-milestone"></p>
       <button type="button" class="pill mode-btn portrait-only" data-action="mode" aria-label="Placement mode" title="Placement mode (Ctrl)"><span class="mode-name">Assisted</span></button>
+      <button type="button" class="icon-btn help-btn" data-action="explore" aria-label="Special blocks: what each one does" title="Special blocks (? or H)"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></button>
       <button type="button" class="icon-btn pause-btn" data-action="pause" aria-label="Pause" title="Pause (Esc or P)"><svg class="icon" aria-hidden="true"><use href="#i-pause"/></svg></button>
     </header>
 
     <!-- Batch tray: bottom in portrait, lower sidebar on wide screens. A block dragged from here
-         onto the playfield drops where it is let go; dragged back here, it stays. -->
+         (or on the playfield) drops where it is let go over the playfield; dragged back here, the
+         tray turns red and letting go cancels. -->
     <footer id="hud-tray" class="hud hud-tray">
       <button type="button" class="odds-chip portrait-only" id="odds-chip" data-action="odds" aria-label="Block odds">
         <span class="chip-row odds-good"><i class="odds-mark mark-pos" aria-hidden="true">+</i><span class="chip-label">Good</span><b class="chip-val" data-odds="pos">0%</b></span>
@@ -75,15 +78,26 @@
         <p id="hud-desc" class="hud-desc" aria-live="polite"></p>
         <p id="tray-cue" class="tray-cue" aria-hidden="true"></p>
       </div>
+      <!-- Each special block gets a "?" badge in its top corner: a button of its own (beside the
+           slot, never inside it) that opens the block's card and never picks the block up -->
       <div class="slots" id="slots">
-        <button type="button" class="slot" data-action="slot" data-slot="0" aria-label="Block 1" title="Drag onto the playfield and let go to drop it (click or 1 picks it)"><kbd class="slot-key">1</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
-        <button type="button" class="slot" data-action="slot" data-slot="1" aria-label="Block 2" title="Drag onto the playfield and let go to drop it (click or 2 picks it)"><kbd class="slot-key">2</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
-        <button type="button" class="slot" data-action="slot" data-slot="2" aria-label="Block 3" title="Drag onto the playfield and let go to drop it (click or 3 picks it)"><kbd class="slot-key">3</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
+        <div class="slot-cell">
+          <button type="button" class="slot" data-action="slot" data-slot="0" aria-label="Block 1" title="Drag onto the playfield and let go to drop it (click or 1 picks it)"><kbd class="slot-key">1</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
+          <button type="button" class="slot-help" data-action="block-info" data-help="0" aria-label="What does this block do?" hidden><span class="help-dot" aria-hidden="true">?</span></button>
+        </div>
+        <div class="slot-cell">
+          <button type="button" class="slot" data-action="slot" data-slot="1" aria-label="Block 2" title="Drag onto the playfield and let go to drop it (click or 2 picks it)"><kbd class="slot-key">2</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
+          <button type="button" class="slot-help" data-action="block-info" data-help="1" aria-label="What does this block do?" hidden><span class="help-dot" aria-hidden="true">?</span></button>
+        </div>
+        <div class="slot-cell">
+          <button type="button" class="slot" data-action="slot" data-slot="2" aria-label="Block 3" title="Drag onto the playfield and let go to drop it (click or 3 picks it)"><kbd class="slot-key">3</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
+          <button type="button" class="slot-help" data-action="block-info" data-help="2" aria-label="What does this block do?" hidden><span class="help-dot" aria-hidden="true">?</span></button>
+        </div>
       </div>
       <div class="tray-actions wide-only">
         <button type="button" class="pill mode-btn" data-action="mode" aria-label="Placement mode" title="Placement mode (Ctrl)"><small>Mode</small><span class="mode-name">Assisted</span></button>
       </div>
-      <p class="hud-drag wide-only"><svg class="icon" aria-hidden="true"><use href="#i-drag"/></svg><span>Drag a block onto the playfield and let go to drop it. Drag it back here to cancel.</span></p>
+      <p class="hud-drag wide-only"><svg class="icon" aria-hidden="true"><use href="#i-drag"/></svg><span>Drag a block onto the playfield, or drag on the playfield, and let go to drop it. Drag back here to cancel.</span></p>
       <dl class="hud-keys wide-only" aria-label="Keyboard">
         <div><dt><kbd>&larr;</kbd><kbd>&rarr;</kbd></dt><dd>Move</dd></div>
         <div><dt><kbd>&darr;</kbd></dt><dd>Next</dd></div>
@@ -93,6 +107,7 @@
         <div><dt><kbd>Esc</kbd></dt><dd>Pause</dd></div>
         <div><dt><kbd>O</kbd></dt><dd>Odds</dd></div>
         <div><dt><kbd>M</kbd></dt><dd>Mute</dd></div>
+        <div class="keys-help"><dt><kbd>?</kbd><kbd>H</kbd></dt><dd>Special blocks</dd></div>
       </dl>
       <p class="hud-seed wide-only" id="hud-seed"></p>
     </footer>
@@ -105,7 +120,7 @@
       <section class="screen screen-title" data-screen="title" aria-label="TeTrowers main menu">
         <div class="title-wrap">
           <h1 class="logo" aria-label="TeTrowers">
-            <span class="tile" aria-hidden="true" style="--c:#dde5ec;--k:#26303b;--i:0">T</span><span class="tile" aria-hidden="true" style="--c:#9fe2f5;--k:#0f3a4b;--i:1">e</span><span class="tile" aria-hidden="true" style="--c:#3b78f5;--k:#ffffff;--i:2">T</span><span class="tile" aria-hidden="true" style="--c:#3aa953;--k:#ffffff;--i:3">r</span><span class="tile" aria-hidden="true" style="--c:#a39f97;--k:#25221f;--i:4">o</span><span class="tile" aria-hidden="true" style="--c:#cf8a3d;--k:#2b1806;--i:5">w</span><span class="tile" aria-hidden="true" style="--c:#ff6a1a;--k:#2b0d00;--i:6">e</span><span class="tile" aria-hidden="true" style="--c:#d33a34;--k:#ffffff;--i:7">r</span><span class="tile" aria-hidden="true" style="--c:#24242b;--k:#ff8a6b;--i:8">s</span>
+            <span class="tile" aria-hidden="true" style="--c:#dde5ec;--k:#26303b;--i:0">T</span><span class="tile" aria-hidden="true" style="--c:#9fe2f5;--k:#0f3a4b;--i:1">e</span><span class="tile" aria-hidden="true" style="--c:#3b78f5;--k:#ffffff;--i:2">T</span><span class="tile" aria-hidden="true" style="--c:#3aa953;--k:#ffffff;--i:3">r</span><span class="tile" aria-hidden="true" style="--c:#a39f97;--k:#25221f;--i:4">o</span><span class="tile" aria-hidden="true" style="--c:#efb42c;--k:#2b1a00;--i:5">w</span><span class="tile" aria-hidden="true" style="--c:#ff6a1a;--k:#2b0d00;--i:6">e</span><span class="tile" aria-hidden="true" style="--c:#d33a34;--k:#ffffff;--i:7">r</span><span class="tile" aria-hidden="true" style="--c:#24242b;--k:#ff8a6b;--i:8">s</span>
           </h1>
           <p class="tagline">Stack the tower. <span class="cold">Cold blocks help</span>, <span class="warm">warm blocks bite</span>.</p>
           <p class="title-best" id="title-best"></p>
@@ -166,28 +181,29 @@
             <h2 id="howto-title">How to Play</h2>
           </header>
           <div class="howto">
-            <p class="lead">Drop blocks onto the platform and build the tallest tower you can. Your score is the best height your tower reaches.</p>
+            <p class="lead">Drop blocks onto the platform and build the tallest tower you can. Every block, special or not, is a tetromino of four cells, and blocks are never rotated. Your score is the best height your tower reaches.</p>
 
             <h3>Controls</h3>
             <table class="controls">
               <thead><tr><th scope="col"></th><th scope="col">Touch or mouse</th><th scope="col">Keyboard</th></tr></thead>
               <tbody>
-                <tr><th scope="row">Drop a block</th><td data-label="Touch, mouse">Drag it from the tray onto the playfield and let go</td><td data-label="Keyboard"><kbd>Space</kbd> or <kbd>Enter</kbd></td></tr>
+                <tr><th scope="row">Drop a block</th><td data-label="Touch, mouse">Drag it from the tray onto the playfield, or drag on the playfield, and let go over the playfield</td><td data-label="Keyboard"><kbd>Space</kbd> or <kbd>Enter</kbd></td></tr>
                 <tr><th scope="row">Aim</th><td data-label="Touch, mouse">While you drag, the block follows your finger or the mouse</td><td data-label="Keyboard"><span class="keys"><kbd>&larr;</kbd> <kbd>&rarr;</kbd></span> <small>hold to repeat</small></td></tr>
-                <tr><th scope="row">Cancel</th><td data-label="Touch, mouse">Drag the block back into the tray and let go</td><td data-label="Keyboard" class="none">&ndash;</td></tr>
+                <tr><th scope="row">Cancel</th><td data-label="Touch, mouse">Drag back into the tray (it turns red) and let go</td><td data-label="Keyboard" class="none">&ndash;</td></tr>
                 <tr><th scope="row">Switch block</th><td data-label="Touch, mouse">Tap or click a block in the tray</td><td data-label="Keyboard"><kbd>&darr;</kbd> next, <kbd>&uarr;</kbd> previous, or <span class="keys"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></td></tr>
                 <tr><th scope="row">Placement mode</th><td data-label="Touch, mouse">Mode button</td><td data-label="Keyboard"><kbd>Ctrl</kbd></td></tr>
                 <tr><th scope="row">Pause</th><td data-label="Touch, mouse">Pause button</td><td data-label="Keyboard"><kbd>Esc</kbd> or <kbd>P</kbd></td></tr>
                 <tr><th scope="row">Block odds</th><td data-label="Touch, mouse">The Good / Bad odds</td><td data-label="Keyboard"><kbd>O</kbd></td></tr>
+                <tr><th scope="row">Special blocks</th><td data-label="Touch, mouse">The <b>?</b> on a block in the tray explains it; the <b>?</b> button at the top lists them all</td><td data-label="Keyboard"><kbd>?</kbd> or <kbd>H</kbd></td></tr>
                 <tr><th scope="row">Sound</th><td data-label="Touch, mouse">Settings</td><td data-label="Keyboard"><kbd>M</kbd> mutes</td></tr>
               </tbody>
             </table>
-            <p class="note">With touch or the mouse, dragging is the only way to drop: pick a block up in the tray, aim it over the playfield and let go. Drag it back into the tray (or let go anywhere outside the playfield) and nothing drops. A drag that starts on the playfield only moves the block. Let go while the last block is still settling and your block drops as soon as it can (<b>Dropping when ready</b>); a new drag, a key press or pausing cancels that.</p>
+            <p class="note">With touch or the mouse, any drag that ends over the playfield drops: pick a block up in the tray, or drag on the playfield to take the block that is already selected, aim it and let go. While you drag back over the tray (or anywhere outside the playfield) the tray turns red with <b>Release to cancel</b> and the block on the playfield is greyed out and crossed: let go there and nothing drops. A tap never drops: on the tray it picks a block, on the playfield it does nothing. Let go while the last block is still settling and your block drops as soon as it can (<b>Dropping when ready</b>); a new drag, a key press or pausing cancels that.</p>
 
             <h3>Placement modes</h3>
             <dl class="defs">
               <dt>Assisted <small>(default)</small></dt>
-              <dd>Steps between the spots where your block sits flush with the block it will land on, and in half-block steps over empty space. While it falls it follows its target, so a support that shifts a little cannot make it clip a corner and miss.</dd>
+              <dd>Half-block steps, plus every spot where an edge of your block lines up with a corner of the blocks below it or an edge of the platform. While it falls it follows its target, so a support that shifts a little cannot make it clip a corner and miss.</dd>
               <dt>Fixed</dt>
               <dd>Half-block steps. No help while falling.</dd>
               <dt>Manual</dt>
@@ -198,7 +214,7 @@
             <ul class="bullets">
               <li>Each round deals <b data-c="BATCH_SIZE">3</b> blocks. Place them in any order; the next round comes when all of them are down.</li>
               <li>A turn runs from one drop to the next. The first block that falls off the tower during a turn costs a life. Any more losses in the same turn are free.</li>
-              <li>Blocks that are swallowed, blown up, melted or destroyed by spikes do not cost lives.</li>
+              <li>Blocks that are swallowed, blown up, melted, destroyed by spikes or smashed by an anvil do not cost lives.</li>
               <li>You have <b data-c="MAX_LIVES">3</b> lives. When the last one is gone, the run is over.</li>
             </ul>
 
@@ -206,7 +222,7 @@
             <p>Every <b data-c="LIFE_MILESTONE">10</b> m of best height gives you a life back. A Crystal Heart restores one too, or gives you a shield when your lives are full. The dashed line on the playfield marks the next milestone.</p>
 
             <h3>The higher, the meaner</h3>
-            <p><span class="cold">Good blocks (cold colours: white, green, blue)</span> get rarer and <span class="warm">bad blocks (warm colours: red, orange, black)</span> more common as your tower grows. Every run ends eventually, so make every drop count.</p>
+            <p><span class="cold">Good blocks (cold colours: white, green, blue, indigo)</span> get rarer and <span class="warm">bad blocks (warm colours: red, orange, amber, black)</span> more common as your tower grows. Every run ends eventually, so make every drop count.</p>
             <p>The <span class="cold">Good</span> / <span class="warm">Bad</span> odds on screen are the chances for each block you are dealt at your best height. Tap or click them (or press <kbd>O</kbd>) to see every block's odds and which block unlocks next.</p>
 
             <h3>Petrify</h3>
@@ -217,6 +233,7 @@
             <p><b>Restart</b> (pause menu) and <b>Play again</b> (game over) start a new random seed, with the same placement mode and block set. Tick <b>Same seed</b> next to them to replay the seed you are on instead; the choice is remembered.</p>
 
             <h3>Block codex</h3>
+            <p>During a run, every special block in the tray has a small <b>?</b> in its top corner: tap or click it to see what that block does, from which height it appears and how likely it is right now (it never picks the block up). The <b>?</b> button at the top of the screen (or <kbd>?</kbd> / <kbd>H</kbd>) lists every special block, good and bad. Both pause the game until you close them.</p>
             <div id="codex" class="codex"></div>
           </div>
         </div>
@@ -289,6 +306,38 @@
             <div class="odds-col" id="odds-col-bad"></div>
           </div>
           <p class="note" id="odds-foot" hidden>Blocks marked <b>off</b> are switched off under Special Blocks.</p>
+        </div>
+      </section>
+
+      <!-- SPECIAL-BLOCK EXPLORER (the "?" button; rows built by ui.js, a row opens the block's card) -->
+      <section class="screen" data-screen="explore" aria-labelledby="explore-title" hidden>
+        <div class="panel panel-wide">
+          <header class="panel-head">
+            <button type="button" class="icon-btn back-btn" data-action="back" aria-label="Close" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
+            <h2 id="explore-title">Special blocks</h2>
+          </header>
+          <p class="note"><span class="cold">Cold colours help</span>, <span class="warm">warm colours hurt</span>, and bad blocks get more common the higher you build. The figures are the chances for each block you are dealt now. Tap a block for its card.</p>
+          <div class="explore-body" id="explore-body"></div>
+          <button type="button" class="btn explore-close" data-action="back">Close</button>
+        </div>
+      </section>
+
+      <!-- BLOCK CARD (the "?" badge on a block in the tray, or a row of the explorer) -->
+      <section class="screen" data-screen="blockinfo" aria-labelledby="info-name" hidden>
+        <div class="panel panel-narrow info-panel" id="info-panel">
+          <canvas class="info-canvas" id="info-canvas"></canvas>
+          <p class="info-cat" id="info-cat"></p>
+          <h2 class="info-name" id="info-name"></h2>
+          <p class="info-desc" id="info-desc"></p>
+          <dl class="info-facts">
+            <div><dt>Appears</dt><dd id="info-unlock"></dd></div>
+            <div><dt>Chance now</dt><dd id="info-odds"></dd></div>
+          </dl>
+          <p class="hint center" id="info-note"></p>
+          <div class="menu">
+            <button type="button" class="btn btn-primary" data-action="back" data-autofocus>Close</button>
+            <button type="button" class="btn btn-quiet" data-action="explore" id="info-all">All special blocks</button>
+          </div>
         </div>
       </section>
 

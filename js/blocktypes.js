@@ -3,14 +3,14 @@
  * WARM (red/orange/black) = negative. Behaviour lives in effects.js, keyed by `key`.
  *
  * Fields:
- *   key, name, category ('normal' | 'positive' | 'negative' | 'internal')
+ *   key, name, category ('normal' | 'positive' | 'negative')
  *   desc        one-line rule text for the codex / first-seen toast
  *   colors      { base, light, dark, accent } hex strings used by the renderer & UI
  *   icon        renderer glyph id drawn on each cell (null = plain)
  *   density, friction, restitution   physics material
  *   weight      relative pick weight inside its category
  *   unlock      best height (m) from which the generator may produce it
- *   shape       forced shape id (otherwise a uniformly random tetromino orientation)
+ * Every type is dealt as a uniformly random tetromino orientation: no type forces a shape.
  */
 (function (TT) {
   'use strict';
@@ -18,7 +18,7 @@
   const T = {};
   function def(o) {
     T[o.key] = Object.freeze(Object.assign({
-      icon: null, density: 1, friction: TT.CONFIG.FRICTION, restitution: 0, weight: 1, unlock: 0, shape: null
+      icon: null, density: 1, friction: TT.CONFIG.FRICTION, restitution: 0, weight: 1, unlock: 0, heavy: false
     }, o, { colors: Object.freeze(o.colors) }));
   }
 
@@ -27,12 +27,6 @@
     key: 'normal', name: 'Stone', category: 'normal',
     desc: 'A plain block. Stack it well.',
     colors: { base: '#a39f97', light: '#c9c5bc', dark: '#6f6b64', accent: '#8c877f' }
-  });
-  // Single cells produced by shattering/crumbling. Drawn in the look of what it came from.
-  def({
-    key: 'rubble', name: 'Rubble', category: 'internal',
-    desc: 'A loose single cell left behind when a block shatters.',
-    colors: { base: '#8f8a82', light: '#b3aea5', dark: '#5f5b55', accent: '#4a4642' }, icon: 'cracks'
   });
 
   // ---- Positive (cold) ----------------------------------------------------
@@ -69,22 +63,10 @@
 
   // ---- Negative (warm) ----------------------------------------------------
   def({
-    key: 'pebble', name: 'Pebble', category: 'negative', icon: 'pebble', shape: 'P1',
-    desc: 'Just one tiny cell.',
-    colors: { base: '#c0553a', light: '#e68a6b', dark: '#6c2a19', accent: '#f1b49e' },
-    weight: 3, unlock: 0
-  });
-  def({
-    key: 'crumble', name: 'Crumble', category: 'negative', icon: 'cracks',
-    desc: 'Falls apart into single cells the moment it lands.',
-    colors: { base: '#cf8a3d', light: '#f2b66c', dark: '#7a4a1a', accent: '#5a3410' },
-    weight: 3, unlock: 0
-  });
-  def({
     key: 'rubber', name: 'Rubber', category: 'negative', icon: 'bounce',
-    desc: 'Bouncy. It bounces when it lands, and so does anything dropped on it.',
+    desc: 'Bouncy and heavy: it drops with full weight and bounces when it lands.',
     colors: { base: '#efb42c', light: '#ffd979', dark: '#9a6a0c', accent: '#c0392b' },
-    restitution: 0.55, weight: 2.5, unlock: 3
+    restitution: 0.55, weight: 2.5, unlock: 0, heavy: true
   });
   def({
     key: 'oil', name: 'Oil Slick', category: 'negative', icon: 'drop',
@@ -94,7 +76,7 @@
   });
   def({
     key: 'glass', name: 'Ruby Glass', category: 'negative', icon: 'glass',
-    desc: 'Looks solid, but shatters into loose cells the first time a block lands on it.',
+    desc: 'Looks solid, but shatters away the first time a block lands on it.',
     colors: { base: '#e25a72', light: '#ffb3c0', dark: '#8a1f36', accent: '#ffffff' },
     weight: 2, unlock: 8
   });
@@ -118,9 +100,9 @@
   });
   def({
     key: 'anvil', name: 'Anvil', category: 'negative', icon: 'anvil',
-    desc: 'Very heavy. Shatters the blocks it lands on into single cells.',
+    desc: 'Very heavy. Smashes the blocks it lands on to dust.',
     colors: { base: '#3a3a41', light: '#6b6b76', dark: '#17171b', accent: '#ff5a2a' },
-    density: 4, weight: 2, unlock: 20
+    density: 4, weight: 2, unlock: 20, heavy: true   // the one block that falls with full weight
   });
   def({
     key: 'blackhole', name: 'Black Hole', category: 'negative', icon: 'swirl',
@@ -132,7 +114,7 @@
   // Normal blocks get a subtle neutral tint per tetromino family (saturation kept low
   // so no family reads as "cold" or "warm").
   const NORMAL_TINTS = Object.freeze({
-    I: '#a8a398', O: '#9f9fa6', T: '#aaa095', S: '#9fa49b', Z: '#a69da3', J: '#9ba0a8', L: '#aca69b', P: '#a39f97'
+    I: '#a8a398', O: '#9f9fa6', T: '#aaa095', S: '#9fa49b', Z: '#a69da3', J: '#9ba0a8', L: '#aca69b'
   });
 
   const SPECIAL_KEYS = Object.freeze(Object.keys(T).filter((k) => T[k].category === 'positive' || T[k].category === 'negative'));

@@ -2,7 +2,8 @@
 /* TeTrowers — headless balancing simulator.
  *
  * Plays complete runs with a heuristic bot (real physics, real rules) and reports how long
- * runs last. Use it to tune js/config.js toward the target session (10-20 min, 100-500 drops).
+ * runs last, and how long the next drop takes to be allowed after each one (drop->ready).
+ * Use it to tune js/config.js toward the target session (10-20 min, 100-500 drops).
  *
  *   node tools/sim.js [--runs 8] [--seed BASE] [--think 3] [--noise 0.6] [--max-drops 900]
  *                     [--mode assisted] [--set NEG_PER_M=0.012,LIFE_MILESTONE=12] [--quiet]
@@ -41,7 +42,8 @@ const MAX_DROPS = +(args['max-drops'] || 900);
 const MODE = args.mode || 'assisted';
 const BASE = args.seed || 'SIM';
 const DT = 1 / 60;
-const NEG_TRASH = new Set(['mine', 'anvil', 'magma', 'blackhole', 'crumble', 'oil']);
+const NEG_TRASH = new Set(['mine', 'anvil', 'magma', 'blackhole', 'oil']);
+const PLATFORM_MID = (C.PLATFORM_X0 + C.PLATFORM_X1) / 2;
 
 function parseArgs(list) {
   const out = {};
@@ -84,7 +86,7 @@ function scorePlacement(game, surface, spec, x, rng) {
   const w = L.warnings;
   if (w.includes('horizon')) s += NEG_TRASH.has(key) ? -30 : 400; // a black hole doubles as a bin
   if (w.includes('spikes')) s += NEG_TRASH.has(key) ? -10 : 300;
-  if (w.includes('mine')) s += key === 'pebble' ? 12 : 120;
+  if (w.includes('mine')) s += 120;
   if (w.includes('glass')) s += 35;
 
   // Real support: which skyline samples under each piece column touch its bottom
@@ -131,7 +133,7 @@ function scorePlacement(game, surface, spec, x, rng) {
   s -= Math.min(span, 9) * 0.25; // a wider footprint is a steadier tower
 
   const center = x + shape.w / 2;
-  const fromMid = Math.abs(center - C.FIELD_WIDTH / 2);
+  const fromMid = Math.abs(center - PLATFORM_MID);
   if (NEG_TRASH.has(key) || key === 'glass' || key === 'spikes') s -= fromMid * 0.8; // hazards to the rim
   else s += fromMid * 0.15;
   if (key === 'anvil' && L.primary && !(L.primary.isPlatform || L.primary.body.isStatic())) s += 20;
@@ -173,6 +175,8 @@ function playRun(seed) {
     for (const ev of ['explode', 'shatter', 'swallow', 'pop', 'melt']) game.on(ev, (p) => console.log(`    ${ev} ${p.cause || ''} at (${(p.x || 0).toFixed(1)}, ${(p.y || 0).toFixed(1)})`));
   }
   let frames = 0, updMs = 0, lateMs = 0, lateFrames = 0, maxFrameMs = 0;
+  const waits = [];   // s from each drop until the next drop is allowed
+  let dropAt = null;
   const t0 = Date.now();
   while (game.state !== 'over' && game.turn < MAX_DROPS) {
     let guard = 0;
@@ -185,11 +189,13 @@ function playRun(seed) {
     }
     if (game.state !== 'playing') break;
     if (!game.canDrop) break;
+    if (dropAt != null) waits.push(game.physics.time - dropAt);
     const mv = chooseMove(game, rng);
     if (!mv) break;
     game.selectSlot(mv.i);
     game.setTargetX(mv.x);
     game.drop();
+    dropAt = game.physics.time;
   }
   for (let k = 0; k < 60 * 3 && game.state !== 'over'; k++) game.update(DT);
   const simTime = game.physics.time;
@@ -197,7 +203,7 @@ function playRun(seed) {
     seed, drops: game.turn, best: game.bestHeight, height: game.height, over: game.state === 'over',
     lives: game.lives, lifeLossAt, causes, stats: game.stats, blocks: game.physics.blocks.length,
     statics: game.physics.blocks.length - game.physics.movers.length,
-    minutes: (simTime + game.turn * THINK) / 60, simTime,
+    minutes: (simTime + game.turn * THINK) / 60, simTime, waits,
     avgUpdateMs: updMs / Math.max(1, frames), lateUpdateMs: lateFrames ? lateMs / lateFrames : null, maxFrameMs,
     wallMs: Date.now() - t0
   };
@@ -228,11 +234,16 @@ for (let r = 0; r < RUNS; r++) {
   }
 }
 const drops = results.map((r) => r.drops), mins = results.map((r) => r.minutes), best = results.map((r) => r.best);
+const waits = [].concat(...results.map((r) => r.waits));
 console.log('---');
 console.log(`runs ${RUNS}  think ${THINK}s  noise ${NOISE}  mode ${MODE}${args.set ? '  set ' + args.set : ''}`);
 console.log(`drops   median ${pct(drops, 0.5)}  p10 ${pct(drops, 0.1)}  p90 ${pct(drops, 0.9)}`);
 console.log(`minutes median ${pct(mins, 0.5).toFixed(1)}  p10 ${pct(mins, 0.1).toFixed(1)}  p90 ${pct(mins, 0.9).toFixed(1)}`);
 console.log(`best m  median ${pct(best, 0.5).toFixed(1)}  p10 ${pct(best, 0.1).toFixed(1)}  p90 ${pct(best, 0.9).toFixed(1)}`);
+if (waits.length) {
+  const avg = waits.reduce((a, b) => a + b, 0) / waits.length;
+  console.log(`drop->ready s  avg ${avg.toFixed(2)}  median ${pct(waits, 0.5).toFixed(2)}  p10 ${pct(waits, 0.1).toFixed(2)}  p90 ${pct(waits, 0.9).toFixed(2)}  (${waits.length} drops)`);
+}
 const agg = {};
 for (const r of results) for (const [k, v] of Object.entries(r.causes)) agg[k] = (agg[k] || 0) + v;
 console.log('lost blocks by look:', JSON.stringify(agg));

@@ -23,12 +23,13 @@
   const App = {
     settings: null, game: null, renderer: null, audio: null, input: null, ui: null,
     urlSeed: '', debug: false,
-    startGame, restart, quitToMenu, pause, resume, togglePause, showOdds,
+    startGame, restart, quitToMenu, pause, resume, togglePause, showOdds, showExplorer, showBlockInfo,
     setSetting, setEnabledTypes, toggleMute, wake, sfx, navigated, loadSettings, lockPortrait
   };
 
   // The special types of the first release. Settings saved without knownTypes knew only these,
-  // so every type added since then starts enabled for those players too.
+  // so every type added since then starts enabled for those players too. Types removed since
+  // (pebble, crumble) are simply dropped: saved lists are filtered to TT.SPECIAL_KEYS.
   const FIRST_TYPES = ['steel', 'vine', 'crystal', 'frost', 'pebble', 'crumble', 'oil', 'mine', 'magma', 'anvil', 'blackhole'];
   TT.App = App;
 
@@ -77,7 +78,7 @@
       if (typeof saved[k] === 'boolean') s[k] = saved[k];
     }
     if (Array.isArray(saved.enabledTypes)) {
-      // Types added by a later version (absent from knownTypes) start enabled
+      // Types added by a later version (absent from knownTypes) start enabled; removed ones drop out
       const known = new Set(Array.isArray(saved.knownTypes) ? saved.knownTypes : FIRST_TYPES);
       s.enabledTypes = TT.SPECIAL_KEYS.filter((k) => saved.enabledTypes.includes(k) || !known.has(k));
     }
@@ -256,8 +257,9 @@
 
   function pause() {
     const g = App.game;
-    if (!g || g.state !== 'playing' || !g.pause()) return false;
-    App.input.releaseAll();
+    if (!g || g.state !== 'playing') return false;
+    App.input.releaseAll();   // first, while the game is live: a block in hand goes back where it was
+    if (!g.pause()) return false;
     App.ui.show('pause', { replace: true });
     return true;
   }
@@ -276,19 +278,31 @@
     else if (g.state === 'paused') resume();
   }
 
-  // Odds panel (chip, sidebar, pause menu, O key). Opened from play it pauses the game, and
-  // closing it resumes (ui.back); opened from the pause menu it returns there.
-  function showOdds() {
+  // A panel over the game: the odds (chip, sidebar, pause menu, O key), the special-block explorer
+  // (the "?" button, ? / H) and a block's card (the "?" badge on a block in the tray). Opened from
+  // play it pauses the game and closing it resumes (ui.back); opened while paused (from the pause
+  // menu, or from another such panel) it opens on top and returns there.
+  function showPanel(name) {
     const g = App.game;
     if (!g) return false;
     if (g.state === 'paused') {
-      App.ui.show('odds');
+      App.ui.show(name);
       return true;
     }
-    if (g.state !== 'playing' || g.ending || !g.pause()) return false;
+    if (g.state !== 'playing' || g.ending) return false;
     App.input.releaseAll();
-    App.ui.show('odds', { replace: true });
+    if (!g.pause()) return false;
+    App.ui.show(name, { replace: true });
     return true;
+  }
+
+  function showOdds() { return showPanel('odds'); }
+
+  function showExplorer() { return showPanel('explore'); }
+
+  // key: a special type key; spec (optional): the dealt block, previewed exactly as it will look
+  function showBlockInfo(key, spec) {
+    return !!App.game && App.ui.setBlockInfo(key, spec) && showPanel('blockinfo');
   }
 
   // ---- layout -------------------------------------------------------------------------------
@@ -464,6 +478,7 @@
       isBlocked: () => App.ui.isMenuOpen(),
       onPause: togglePause,
       onOdds: showOdds,
+      onHelp: showExplorer,
       onMute: toggleMute,
       onActivity: wake
     });

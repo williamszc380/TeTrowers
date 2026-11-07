@@ -2,18 +2,22 @@
  *
  * Keyboard (window): Left/Right move with our own repeat (the OS auto-repeat is ignored), Down picks
  * the next block and Up the previous one (once per press), Space/Enter drop, Ctrl tapped on its own
- * (not as part of a shortcut) cycles the placement mode, Esc/P pause, O block odds, M mute, 1-3 pick
- * a slot. Space and Enter on a control the player reached with the keyboard press that control.
- * Pointer (mouse, touch and pen behave the same): dragging a block out of the tray picks it up; over
- * the playfield the hovering piece follows the pointer, and letting go there drops it. Dragged back
- * over the tray (or let go anywhere else) nothing drops and the piece is back where it was picked up.
- * Let go before the drop is allowed, the drop waits until it is (any new drag, selection, key move,
- * pause or menu cancels it). A tap on a slot only selects it; a drag that starts on the playfield
- * only moves the piece and never drops it.
+ * (not as part of a shortcut) cycles the placement mode, Esc/P pause, O block odds, ? or H the
+ * special-block explorer, M mute, 1-3 pick a slot. Space and Enter on a control the player reached
+ * with the keyboard press that control.
+ * Pointer (mouse, touch and pen behave the same): a drag that starts on a tray slot picks that block
+ * up, a drag that starts on the playfield takes the block that is already selected. Either way the
+ * block is in hand: over the playfield the hovering piece follows the pointer, and letting go there
+ * drops it. Over the tray, the HUD or outside the window (the cancel zone) the piece is back where it
+ * was picked up, and letting go there drops nothing. Let go before the drop is allowed, the drop
+ * waits until it is (any new drag, selection, key move, pause or menu cancels it). A tap never
+ * drops: on a slot it only selects it, on the playfield it does nothing. A press on the "?" badge
+ * of a block ([data-help], ui.js opens the block's card on its click) is not ours at all.
  * Game keys are captured (preventDefault) only while a game is live and no menu covers it.
  * update(dt) is called once per frame by the main loop: hold / repeat timing, the latest pointer
  * position (moves are coalesced to one aim per frame) and the waiting drop. `cue` tells ui.js what
- * to show: the lifted slot, where the drag is ('field' | 'cancel') and whether a drop is waiting.
+ * to show: the lifted slot, where the drag is ('field' | 'cancel'), whether a drop is waiting and
+ * how many drags were let go in the cancel zone so far.
  */
 (function (TT) {
   'use strict';
@@ -35,6 +39,7 @@
       case 'Control': return 'mode';
       case 'Escape': case 'Esc': case 'p': case 'P': return 'pause';
       case 'o': case 'O': return 'odds';
+      case '?': case 'h': case 'H': return 'help';
       case 'm': case 'M': return 'mute';
       default: break;
     }
@@ -79,6 +84,11 @@
     return t && typeof t.closest === 'function' ? t.closest('[data-slot]') : null;
   }
 
+  // The "?" badge in a slot's corner: a button of its own that explains the block
+  function helpBadge(t) {
+    return t && typeof t.closest === 'function' ? t.closest('[data-help]') : null;
+  }
+
   // The previous unused slot, wrapping (the counterpart of game.selectNext)
   function selectPrev(game) {
     const b = game.batch, n = b.length;
@@ -93,7 +103,7 @@
   class Input {
     // opts: { canvas, tray (the batch tray; its [data-slot] buttons are dragged onto the playfield),
     //         getGame(), getRenderer(), isBlocked() -> bool (a menu is open),
-    //         onPause(), onOdds(), onMute(), onActivity() }
+    //         onPause(), onOdds(), onHelp(), onMute(), onActivity() }
     constructor(opts) {
       this.opts = opts || {};
       this.canvas = this.opts.canvas || null;
@@ -101,7 +111,8 @@
       this.held = [];          // held arrow keys, most recent last: { code, dir, t0, next, mode }
       this.ptr = null;         // the press in progress, on a tray slot ('tray') or the playfield ('canvas')
       this.queued = null;      // a drop let go before it was allowed: { game, piece }
-      this.cue = { slot: -1, zone: '', queued: false };   // read by ui.js every frame
+      // Read by ui.js every frame. cancels: drags let go in the cancel zone so far (it only grows)
+      this.cue = { slot: -1, zone: '', queued: false, cancels: 0 };
       this.ctrl = null;        // Ctrl is down: { chord } (chord: something else happened meanwhile)
       this.lastInput = 0;
       this._pt = { x: 0, y: 0 };
@@ -132,7 +143,7 @@
       if (this.tray) {
         this._listen(this.tray, 'pointerdown', (e) => this._pointerDown(e, 'tray'));
         this._listen(this.tray, 'lostpointercapture', lost);
-        this._listen(this.tray, 'contextmenu', (e) => { if (slotButton(e.target)) e.preventDefault(); });
+        this._listen(this.tray, 'contextmenu', (e) => { if (slotButton(e.target) || helpBadge(e.target)) e.preventDefault(); });
       }
     }
 
@@ -149,6 +160,9 @@
 
     // True while keys are held, a pointer gesture is in progress or a drop waits (full frame rate)
     isActive() { return this.held.length > 0 || !!this.ptr || !!this.queued; }
+
+    // True while a press (tap or drag) is in progress: other buttons ignore extra fingers meanwhile
+    isPressing() { return !!this.ptr; }
 
     releaseAll() {
       this.held.length = 0;
@@ -210,6 +224,10 @@
         case 'odds':
           this.releaseAll();
           if (this.opts.onOdds) this.opts.onOdds();
+          break;
+        case 'help':
+          this.releaseAll();
+          if (this.opts.onHelp) this.opts.onHelp();
           break;
         default: this._cancelQueued(); game.selectSlot(Number(action.slice(4))); break;
       }
@@ -304,6 +322,11 @@
     // src: 'tray' (a press on the tray, used only on a slot) or 'canvas' (on the playfield)
     _pointerDown(e, src) {
       this._activity();
+      // The "?" badge on a block opens its card (ui.js): never a pick, a drag, a drop or a cancel
+      if (src === 'tray' && helpBadge(e.target)) {
+        if (this.ptr && this.ptr.id === e.pointerId) this._endPress();   // its release never reached us
+        return;
+      }
       const game = this._game();
       if (!this._live(game)) return;
       let el = this.canvas, slot = -1;
@@ -317,13 +340,12 @@
       }
       if (this.ptr && this.ptr.id === e.pointerId) this._endPress(); // its release never reached us
       if (this.ptr || e.button !== 0) return;                         // extra fingers are ignored
-      const piece = game.piece;
-      // out: a block lifted from the tray was aimed over the playfield (homeX: where it was picked up);
-      // done: it was let go there (dropped or waiting)
+      // out: the block in hand was aimed over the playfield (homeX: where it was picked up);
+      // done: it was let go there (dropped or waiting); cancelled: it was let go in the cancel zone
       const p = this.ptr = {
         id: e.pointerId, src, el, slot, mouse: e.pointerType === 'mouse',
-        path: 0, drag: false, dead: false, dirty: false, out: false, done: false, homeX: 0,
-        x: e.clientX, y: e.clientY, x0: e.clientX, piece, pieceX: piece ? piece.x : 0
+        path: 0, drag: false, dead: false, dirty: false, out: false, done: false, cancelled: false, homeX: 0,
+        x: e.clientX, y: e.clientY
       };
       try { el.setPointerCapture(e.pointerId); } catch (err) { /* moves still arrive on window */ }
       if (src === 'tray') {
@@ -331,6 +353,10 @@
         // at once (a tap ends there); a used or empty slot gives a press that does nothing
         this._cancelQueued();
         p.dead = !this._hold(game, p);
+      } else {
+        // A drag on the playfield takes the block that is selected now (a tap does nothing)
+        p.slot = game.piece ? game.selected : -1;
+        p.dead = p.slot < 0;
       }
     }
 
@@ -350,9 +376,9 @@
       if (!cancelled && this._live(game)) {
         this._track(p, e.clientX, e.clientY);
         if (p.drag && !p.dead) {
-          if (p.src === 'canvas') this._aimRelative(game, p);
-          // Only a block brought out of the tray and let go over the playfield drops
-          else if (this._zone(p.x, p.y) === 'field' && this._hold(game, p)) {
+          // The block in hand drops where it is let go over the playfield; anywhere else nothing drops
+          if (this._zone(p.x, p.y) !== 'field') p.cancelled = true;
+          else if (this._hold(game, p)) {
             this._aimAt(game, p.x, p.y);
             p.done = true;
             if (game.canDrop) game.drop();
@@ -363,7 +389,7 @@
       this._endPress();
     }
 
-    // A block lifted out of the tray that does not drop goes back to where it was picked up
+    // A block in hand that does not drop goes back to where it was picked up
     _endPress() {
       const p = this.ptr;
       this.ptr = null;
@@ -374,6 +400,7 @@
         const g = this._game();
         if (this._live(g)) this._putBack(g, p);
       }
+      if (p.cancelled) this.cue.cancels++;
       if (p.el) {
         try { p.el.releasePointerCapture(p.id); } catch (err) { /* already released */ }
       }
@@ -392,15 +419,15 @@
     _startDrag(p) {
       p.drag = true;
       this._cancelQueued();   // a new drag replaces a waiting drop
-      if (p.src !== 'tray' || p.dead) return;
+      if (p.dead) return;
       const game = this._game();
       if (!this._live(game) || !this._hold(game, p)) { p.dead = true; return; }
-      this.cue.slot = p.slot;   // the block is lifted out of its slot
+      this.cue.slot = p.slot;   // the block is in hand: lifted out of its slot
       this.cue.zone = this._zone(p.x, p.y) === 'field' ? 'field' : 'cancel';
       p.homeX = game.piece.x;
     }
 
-    // The dragged block stays the selected one (a key or the game may have switched meanwhile)
+    // The block in hand stays the selected one (a key or the game may have switched meanwhile)
     _hold(game, p) {
       if (game.selected === p.slot && game.piece) return true;
       if (game.selectSlot(p.slot)) return true;
@@ -408,12 +435,10 @@
       return false;
     }
 
-    // Once per frame with the latest position. A block out of the tray follows the pointer while it
-    // is over the playfield and is back at its pick-up spot anywhere else (where letting go cancels);
-    // a drag that began on the playfield moves the piece relative to its start.
+    // Once per frame with the latest position: the block in hand follows the pointer while it is
+    // over the playfield and is back at its pick-up spot anywhere else (where letting go cancels)
     _aim(game, p) {
       if (!p.drag || p.dead) return;
-      if (p.src === 'canvas') { this._aimRelative(game, p); return; }
       const over = this._zone(p.x, p.y) === 'field';
       this.cue.zone = over ? 'field' : 'cancel';
       if (!over) { this._putBack(game, p); return; }
@@ -434,24 +459,6 @@
       if (!piece || !r || typeof r.screenToWorld !== 'function' || !this.canvas) return;
       const rect = this.canvas.getBoundingClientRect();
       game.setTargetX(r.screenToWorld(x - rect.left, y - rect.top, this._pt).x - piece.shape.w / 2);
-    }
-
-    _aimRelative(game, p) {
-      const piece = game.piece;
-      if (!piece) return;
-      if (piece !== p.piece) {
-        // A new piece appeared mid-drag: continue relative to it from here
-        p.piece = piece;
-        p.pieceX = piece.x;
-        p.x0 = p.x;
-        return;
-      }
-      game.setTargetX(p.pieceX + (p.x - p.x0) / this._scale(game));
-    }
-
-    _scale(game) {
-      const r = this._renderer();
-      return r && r.scale > 0 ? r.scale : 1 / (game.pixelSize || 1 / 40);
     }
 
     // What is under the pointer: 'field' (the playfield itself), 'tray' or 'out' (HUD, sidebar

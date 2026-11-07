@@ -1,7 +1,10 @@
 /* TeTrowers — piece shapes.
- * All 19 fixed tetromino orientations (blocks are never rotated by the player) plus the
- * 1x1 pebble. Cells are [x, y] integer offsets, y UP, normalised so min x = min y = 0.
- * A cell [x, y] occupies the unit square [x, x+1] x [y, y+1] in the piece's local frame.
+ * All 19 fixed tetromino orientations (blocks are never rotated by the player). Cells are
+ * [x, y] integer offsets, y UP, normalised so min x = min y = 0. A cell [x, y] occupies the
+ * unit square [x, x+1] x [y, y+1] in the piece's local frame.
+ * 'P1' (one cell) is a TEST-ONLY probe for tests and tools: gameplay never uses it. It is
+ * not in TETROMINO_IDS, so it is never dealt, it is no block type's shape and game code
+ * never creates it. Every block in play is a tetromino.
  */
 (function (TT) {
   'use strict';
@@ -27,7 +30,7 @@
     L1: ['#.', '#.', '##'],
     L2: ['###', '#..'],
     L3: ['##', '.#', '.#'],
-    P1: ['#']
+    P1: ['#']          // test-only probe, never in play (see above)
   };
 
   // Generator order — NEVER reorder: seeds map indices to these ids.

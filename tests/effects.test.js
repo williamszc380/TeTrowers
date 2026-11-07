@@ -125,8 +125,6 @@ function relPose(base, top) {
   return { x: p.x, y: p.y, a: top.body.getAngle() - base.body.getAngle() };
 }
 
-function liveRubble(g) { return g.physics.blocks.filter((b) => b.typeKey === 'rubble'); }
-
 function solidRec(g, a, b, normal) {
   return { a, b, kindA: 'solid', kindB: 'solid', tagA: null, tagB: null, sensor: false, normal, point: null, time: g.physics.time };
 }
@@ -146,13 +144,14 @@ function onGrid(magnet, b) {
   return { col: Math.round(x), off: x - Math.round(x), tilt: rel - Math.PI / 2 * Math.round(rel / (Math.PI / 2)) };
 }
 
-// Records whether the popped block was still alive when 'pop' was emitted
-function watchPops(g) {
+// Records, for every `name` event ('pop', 'shatter'), whether the block it names was still
+// alive and in the world when it was emitted
+function watchAlive(g, name) {
   const aliveAtEmit = [];
   const emit = g.emit.bind(g);
-  g.emit = (name, p) => {
-    if (name === 'pop') aliveAtEmit.push(!p.block.dead && g.physics.blocks.includes(p.block));
-    emit(name, p);
+  g.emit = (n, p) => {
+    if (n === name) aliveAtEmit.push(!!p.block && !p.block.dead && g.physics.blocks.includes(p.block));
+    emit(n, p);
   };
   return aliveAtEmit;
 }
@@ -383,46 +382,56 @@ test('contact records are handled whichever side the special block is on', () =>
   E.onContact(g, solidRec(g, anvil, beside, null));        // centroid fallback: beside
   assert.strictEqual(g.stats.shattered, 0);
   E.onContact(g, solidRec(g, t1, anvil, { x: 0, y: 1 }));  // t1 -> anvil points up: t1 below
-  assert.ok(t1.dead && t1.deathReason === 'shattered');
+  assert.ok(t1.dead && t1.deathReason === 'smashed' && !P.blocks.includes(t1));
   E.onContact(g, solidRec(g, anvil, t1, { x: 0, y: -1 }));
   E.onContact(g, solidRec(g, anvil, t2, { x: 0, y: -1 }));
   E.onContact(g, solidRec(g, t3, anvil, null));             // centroid fallback: below
-  assert.ok(t2.dead && t3.dead);
-  assert.strictEqual(g.stats.shattered, 3, 'a dead block is never shattered twice');
+  assert.ok(t2.dead && t3.dead && t3.deathReason === 'smashed');
+  assert.strictEqual(g.stats.shattered, 3, 'a dead block is never smashed twice');
   E.onContact(g, solidRec(g, anvil, mine, { x: 0, y: -1 }));
-  assert.ok(!mine.dead, 'mines are not shattered');
+  assert.ok(!mine.dead, 'mines are not smashed');
+  const still = P.createBlock({ typeKey: 'normal', shapeId: 'T0' }, 12, 6);
+  const other = P.createBlock({ typeKey: 'anvil', shapeId: 'O0' }, 2, 8);
+  assert.ok(P.makeStatic(still, 'petrified'));
+  E.onContact(g, solidRec(g, anvil, still, { x: 0, y: -1 }));
+  E.onContact(g, solidRec(g, other, anvil, { x: 0, y: 1 }));
+  assert.ok(!still.dead && !other.dead, 'static blocks and other anvils are immune');
   const t4 = P.createBlock({ typeKey: 'normal', shapeId: 'T0' }, 2, 4);
   g.time = anvil.fx.impactUntil + 0.01;
   assert.ok(E.canPetrify(g, anvil));
   E.onContact(g, solidRec(g, anvil, t4, { x: 0, y: -1 }));
   assert.ok(!t4.dead, 'impact window over');
-  assert.strictEqual(liveRubble(g).length, 12);
+  assert.deepStrictEqual(g.eventsOf('shatter').map((e) => [e.block, e.cause, e.count]),
+    [[t1, 'anvil', 1], [t2, 'anvil', 1], [t3, 'anvil', 1]]);
+  assert.ok(P.blocks.every((b) => TT.TETROMINO_IDS.includes(b.shapeId)), 'nothing was broken into cells');
 });
 
-test('anvil dropped on a T piece shatters it into 4 rubble', () => {
+test('anvil smashes the block it lands on: shatter goes out before removal, nothing is left, the anvil drops into the gap', () => {
   const g = new FakeGame();
+  const aliveAtShatter = watchAlive(g, 'shatter');
   const t = place(g, 'normal', 'T0', 6, 0);
   const anvil = g.drop('anvil', 'O0', 7, 4);
-  assert.ok(g.runUntil(() => t.dead, 2), 'T shattered');
-  assert.strictEqual(t.deathReason, 'shattered');
-  const rubble = liveRubble(g);
-  assert.strictEqual(rubble.length, 4);
-  assert.ok(rubble.every((r) => r.look === 'normal' && r.cracked && r.cells.length === 1));
-  assert.strictEqual(g.stats.shattered, 1);
+  assert.ok(g.runUntil(() => t.dead, 2), 'T smashed');
+  assert.strictEqual(t.deathReason, 'smashed');
+  assert.ok(!g.physics.blocks.includes(t), 'removed from the world');
+  assert.deepStrictEqual(aliveAtShatter, [true], 'shatter is emitted before the block is removed');
   const sh = g.eventsOf('shatter');
   assert.strictEqual(sh.length, 1);
   assert.strictEqual(sh[0].cause, 'anvil');
-  assert.strictEqual(sh[0].count, 4);
+  assert.strictEqual(sh[0].count, 1);
+  assert.strictEqual(sh[0].block, t);
   near(sh[0].x, 7.5, 0.05, 'shatter x (T centroid)');
   near(sh[0].y, 0.75, 0.05, 'shatter y (T centroid)');
+  assert.strictEqual(g.stats.shattered, 1);
   assert.ok(!anvil.dead);
   g.run(1.5);
-  assert.strictEqual(g.stats.shattered, 1, 'rubble is never shattered again');
-  assert.strictEqual(liveRubble(g).length, 4);
+  assert.deepStrictEqual(g.physics.blocks, [anvil], 'no loose cells left behind');
+  near(g.physics.bounds(anvil).minY, 0, 0.03, 'the anvil fell into the gap, onto the platform');
+  assert.strictEqual(g.stats.shattered, 1);
   assert.ok(E.canPetrify(g, anvil), 'impact window is over');
 });
 
-test('anvil does not shatter a mine: the mine detonates instead', () => {
+test('an anvil does not smash a mine: the mine detonates instead', () => {
   const g = new FakeGame();
   const mine = place(g, 'mine', 'O0', 7, 0);
   g.drop('anvil', 'O0', 7, 4);
@@ -432,23 +441,48 @@ test('anvil does not shatter a mine: the mine detonates instead', () => {
   assert.strictEqual(g.stats.shattered, 0);
 });
 
-test('crumble breaks into 4 rubble the moment it lands', () => {
+test('an anvil leaves a static block alone and rests on it', () => {
   const g = new FakeGame();
-  const cr = g.drop('crumble', 'T0', 6, 1);
-  assert.ok(g.runUntil(() => cr.dead, 1), 'crumbled');
-  assert.strictEqual(cr.deathReason, 'shattered');
-  const rubble = liveRubble(g);
-  assert.strictEqual(rubble.length, 4);
-  assert.ok(rubble.every((r) => r.look === 'crumble' && r.cracked && r.touched && r.activated));
-  const sh = g.eventsOf('shatter');
-  assert.strictEqual(sh.length, 1);
-  assert.strictEqual(sh[0].cause, 'crumble');
-  assert.strictEqual(sh[0].count, 4);
-  assert.strictEqual(g.stats.shattered, 1);
-  g.run(1.5);
-  assert.strictEqual(liveRubble(g).length, 4);
-  assert.ok(liveRubble(g).every((r) => g.physics.bounds(r).minY > -0.05), 'rubble rests on the platform');
-  assert.strictEqual(g.stats.shattered, 1);
+  const base = place(g, 'normal', 'O0', 7, 0);
+  assert.ok(g.physics.makeStatic(base, 'petrified'));
+  const anvil = g.drop('anvil', 'O0', 7, 5);
+  assert.ok(g.runUntil(() => anvil.touched, 2));
+  g.run(1);
+  assert.ok(!base.dead && !anvil.dead);
+  assert.strictEqual(g.stats.shattered + g.eventsOf('shatter').length, 0);
+  near(g.physics.bounds(anvil).minY, 2, 0.03, 'the anvil rests on the static block');
+});
+
+test('in the real game: a block smashed by an anvil is not lost and costs no life', () => {
+  const game = TT.Game.create({ seed: 'SMASH', mode: 'fixed', enabledTypes: [] });
+  const step = (s) => { for (let i = 0; i < Math.round(s * 60); i++) game.update(FRAME); };
+  const ready = () => { for (let i = 0; i < 480 && !game.canDrop; i++) game.update(FRAME); return game.canDrop; };
+  const log = [];
+  game.on('*', (name, p) => {
+    if (['shatter', 'blockLost', 'lifeLost', 'shieldUsed', 'pop'].includes(name)) log.push([name, p.block, !!p.block && !p.block.dead]);
+  });
+  step(0.1);
+  const P = game.physics;
+  const victim = P.createBlock({ typeKey: 'normal', shapeId: 'O0' }, 7, 0.02);
+  victim.dropped = true;
+  step(2);
+  assert.ok(victim.activated);
+  assert.ok(ready());
+  game.batch[game.selected].spec = { n: -1, typeKey: 'anvil', shapeId: 'O0' };
+  game.selectSlot(game.selected);
+  game.setTargetX(7);
+  const lives = game.lives;
+  assert.ok(game.drop());
+  const anvil = P.blocks[P.blocks.length - 1];
+  assert.strictEqual(anvil.typeKey, 'anvil');
+  step(3);
+  assert.ok(victim.dead && victim.deathReason === 'smashed', 'smashed by the anvil');
+  assert.deepStrictEqual(log, [['shatter', victim, true]], 'shatter while it still exists; nothing lost');
+  assert.strictEqual(game.lives, lives, 'no life lost');
+  assert.strictEqual(game.stats.shattered, 1);
+  assert.strictEqual(game.stats.lost + game.stats.livesLost, 0);
+  assert.ok(!anvil.dead);
+  near(P.bounds(anvil).minY, 0, 0.05, 'the anvil dropped into the gap');
 });
 
 test('magma melts after exactly MAGMA_TURNS turn starts once settled, even when frozen', () => {
@@ -626,8 +660,9 @@ test('explode pushes dynamic blocks with linear falloff and an upward bias, neve
   assert.strictEqual(E.explode(g, 8, 1, { impulse: 0 }), 1);
 });
 
-test('ruby glass arms, survives a side neighbour, and shatters into glass rubble when an O lands on it', () => {
+test('ruby glass arms, survives a side neighbour, and shatters away when an O lands on it: the O falls into the gap', () => {
   const g = new FakeGame();
+  const aliveAtShatter = watchAlive(g, 'shatter');
   const glass = place(g, 'glass', 'O0', 7, 0);
   assert.ok(glass.fx.armed);
   assert.strictEqual(glass.fx.ignoreIds.size, 0);
@@ -642,24 +677,44 @@ test('ruby glass arms, survives a side neighbour, and shatters into glass rubble
     'a side contact happened');
   assert.ok(!glass.dead, 'a side neighbour does not break it');
 
-  const o = g.drop('normal', 'O0', 7, 6);
+  const o = g.drop('normal', 'O0', 7.5, 6);        // clear of the side block's corner once it falls
   assert.ok(g.runUntil(() => glass.dead, 2), 'shattered by the block landing on it');
   assert.strictEqual(glass.deathReason, 'shattered');
-  const rubble = liveRubble(g);
-  assert.strictEqual(rubble.length, 4);
-  assert.ok(rubble.every((r) => r.look === 'glass' && r.cracked && r.cells.length === 1), 'rubble keeps the glass look');
+  assert.ok(!g.physics.blocks.includes(glass), 'the glass is gone');
+  assert.deepStrictEqual(aliveAtShatter, [true], 'shatter is emitted before the glass is removed');
   const sh = g.eventsOf('shatter');
   assert.strictEqual(sh.length, 1);
   assert.strictEqual(sh[0].cause, 'glass');
-  assert.strictEqual(sh[0].count, 4);
+  assert.strictEqual(sh[0].count, 1);
+  assert.strictEqual(sh[0].block, glass);
   near(sh[0].x, 8, 0.05, 'shatter x');
   near(sh[0].y, 1, 0.05, 'shatter y');
   assert.strictEqual(g.stats.shattered, 1);
   assert.ok(!E.hazards(g).glass.has(glass.id));
   g.run(1.5);
   assert.ok(!o.dead && !side.dead, 'the glass only breaks itself');
+  assert.deepStrictEqual(g.physics.blocks, [side, o], 'no loose cells left behind');
+  near(g.physics.bounds(o).minY, 0, 0.03, 'the O fell into the gap, onto the platform');
+  near(g.physics.bounds(o).minX, 7.5, 0.2, 'down where the glass was');
+  assert.ok(Math.abs(o.body.getAngle()) < 0.01, 'without tipping over');
   assert.strictEqual(g.stats.shattered, 1, 'once');
-  assert.strictEqual(liveRubble(g).length, 4);
+});
+
+test('when glass breaks, everything on it falls into the gap, even a sleeping lid it ignored', () => {
+  const g = new FakeGame();
+  const glass = g.drop('glass', 'I0', 5, 0.02);
+  const lid = g.drop('normal', 'O0', 5, 1.1);
+  assert.ok(g.runUntil(() => glass.activated && lid.activated, 3));
+  assert.ok(glass.fx.armed && glass.fx.ignoreIds.has(lid.id), 'the lid rested on it before it armed');
+  assert.ok(g.runUntil(() => !lid.body.isAwake(), 5), 'the lid falls asleep');
+  const o = g.drop('normal', 'O0', 7, 5);
+  assert.ok(g.runUntil(() => glass.dead, 2), 'the new block breaks it');
+  g.run(1.5);
+  for (const b of [lid, o]) {
+    assert.ok(!b.dead);
+    near(g.physics.bounds(b).minY, 0, 0.03, 'fell onto the platform');
+  }
+  assert.strictEqual(g.stats.shattered, 1);
 });
 
 test('glass ignores a block that rested on it before it armed, even once petrify re-creates their contact', () => {
@@ -693,7 +748,7 @@ test('frozen glass is immune and no longer a hazard', () => {
 
 test('spikes destroy a block dropped on top (no life lost, pop emitted first), spare a side neighbour, and work when static', () => {
   const g = new FakeGame();
-  const aliveAtPop = watchPops(g);
+  const aliveAtPop = watchAlive(g, 'pop');
   const sp = place(g, 'spikes', 'O0', 7, 0);
   assert.ok(sp.fx.active);
   assert.strictEqual(sp.fx.ignoreIds.size, 0);
@@ -738,7 +793,7 @@ test('spikes win against an anvil, and pop a mine without setting it off', () =>
   const anvil = g.drop('anvil', 'O0', 7, 4);
   assert.ok(g.runUntil(() => anvil.dead, 2), 'the anvil is popped');
   assert.strictEqual(anvil.deathReason, 'popped');
-  assert.ok(!sp.dead && sp.cells.length === 4, 'the spikes are not shattered');
+  assert.ok(!sp.dead && g.physics.blocks.includes(sp), 'the spikes are not smashed');
   assert.strictEqual(g.stats.shattered, 0);
   assert.strictEqual(g.stats.popped, 1);
   g.run(1);
@@ -755,7 +810,7 @@ test('spikes win against an anvil, and pop a mine without setting it off', () =>
   assert.ok(!sp2.dead);
 });
 
-test('an anvil dropped on armed glass shatters it exactly once', () => {
+test('an anvil dropped on armed glass: the glass shatters away by itself, exactly once', () => {
   const g = new FakeGame();
   const glass = place(g, 'glass', 'T0', 6, 0);
   const anvil = g.drop('anvil', 'O0', 7, 4);
@@ -765,10 +820,12 @@ test('an anvil dropped on armed glass shatters it exactly once', () => {
   const sh = g.eventsOf('shatter');
   assert.strictEqual(sh.length, 1);
   assert.strictEqual(sh[0].cause, 'glass');
-  assert.strictEqual(sh[0].count, 4);
+  assert.strictEqual(sh[0].count, 1);
+  assert.strictEqual(sh[0].block, glass);
   assert.strictEqual(g.stats.shattered, 1);
-  assert.ok(liveRubble(g).length === 4 && liveRubble(g).every((r) => r.look === 'glass'));
   assert.ok(!anvil.dead);
+  assert.deepStrictEqual(g.physics.blocks, [anvil]);
+  near(g.physics.bounds(anvil).minY, 0, 0.03, 'the anvil fell into the gap');
 });
 
 test('glass and spikes contact records: only a dynamic block landing on top counts, either side (synthetic)', () => {
@@ -800,7 +857,7 @@ test('glass and spikes contact records: only a dynamic block landing on top coun
   E.onContact(g, solidRec(g, o, spikes, { x: 0, y: -1 }));
   const lid = P.createBlock({ typeKey: 'normal', shapeId: 'O0' }, 2, 2);
   E.onContact(g, solidRec(g, glass, lid, null));              // centroid fallback: on top
-  assert.ok(glass.dead && !lid.dead);
+  assert.ok(glass.dead && glass.deathReason === 'shattered' && !lid.dead);
   E.onContact(g, solidRec(g, glass, lid, { x: 0, y: 1 }));
   assert.strictEqual(g.stats.popped, 1, 'idempotent');
   assert.strictEqual(g.stats.shattered, 1, 'idempotent');
@@ -816,10 +873,10 @@ test('glass and spikes contact records: only a dynamic block landing on top coun
   E.onContact(g, solidRec(g, anvils[0], s2, { x: 0, y: -1 }));
   assert.ok(anvils[0].dead && anvils[0].deathReason === 'popped' && !s2.dead);
   E.onContact(g, solidRec(g, anvils[1], g2, { x: 0, y: -1 }));
-  assert.ok(g2.dead && !anvils[1].dead);
+  assert.ok(g2.dead && g2.deathReason === 'shattered' && !anvils[1].dead);
   E.onContact(g, solidRec(g, anvils[2], g3, { x: 0, y: -1 }));
-  assert.ok(g3.dead && !anvils[2].dead);
-  assert.deepStrictEqual(g.eventsOf('shatter').map((s) => s.cause), ['glass', 'glass', 'anvil']);
+  assert.ok(g3.dead && g3.deathReason === 'smashed' && !anvils[2].dead);
+  assert.deepStrictEqual(g.eventsOf('shatter').map((s) => [s.cause, s.block]), [['glass', glass], ['glass', g2], ['anvil', g3]]);
   assert.strictEqual(g.stats.popped, 2);
 });
 
@@ -961,7 +1018,7 @@ test('hazards lists live active spikes and live armed glass that can still break
   assert.ok(P.makeStatic(s2, 'petrified'));   // static spikes still pop
   assert.ok(P.makeStatic(g2, 'frost'));       // frozen glass is immune
   P.removeBlock(s1, 'swallowed');
-  P.shatter(g3);
+  P.removeBlock(g3, 'shattered');
   hz = E.hazards(g);
   assert.deepStrictEqual(ids(hz.spikes), [s2.id]);
   assert.deepStrictEqual(ids(hz.glass), [g1.id]);
@@ -972,7 +1029,7 @@ test('dispatchers ignore dead blocks, the platform and plain types', () => {
   const g = new FakeGame();
   const P = g.physics;
   const plain = P.createBlock({ typeKey: 'normal', shapeId: 'O0' }, 7, 0);
-  const dead = P.createBlock({ typeKey: 'crumble', shapeId: 'T0' }, 2, 0);
+  const dead = P.createBlock({ typeKey: 'anvil', shapeId: 'T0' }, 2, 0);
   P.removeBlock(dead, 'lost');
   E.onFirstTouch(g, dead, null);
   E.onSettle(g, dead);
@@ -987,7 +1044,7 @@ test('dispatchers ignore dead blocks, the platform and plain types', () => {
   assert.ok(E.canPetrify(g, plain));
   assert.ok(!E.canPetrify(g, dead));
   assert.deepStrictEqual(Object.keys(E.HANDLERS).sort(),
-    ['anvil', 'blackhole', 'crumble', 'crystal', 'frost', 'glass', 'magma', 'magnet', 'mine', 'spikes', 'steel', 'vine']);
+    ['anvil', 'blackhole', 'crystal', 'frost', 'glass', 'magma', 'magnet', 'mine', 'spikes', 'steel', 'vine']);
 });
 
 test('in the real game: spikes and glass are flagged by the ghost, and a popped block costs no life', () => {
@@ -1035,8 +1092,10 @@ test('in the real game: spikes and glass are flagged by the ghost, and a popped 
   step(2);
   assert.ok(gl.dead && gl.deathReason === 'shattered', 'the glass broke');
   assert.ok(!lander.dead, 'the block that broke it survives');
+  near(P.bounds(lander).minY, 0, 0.05, 'and fell into the gap, onto the platform');
   assert.strictEqual(game.stats.shattered, 1);
   assert.strictEqual(game.lives, lives);
+  assert.strictEqual(game.stats.lost + game.stats.livesLost, 0);
 });
 
 // --- 'already resting on top' at arming (mine, spikes, glass) ---------------------------
@@ -1117,13 +1176,13 @@ test('a tilted lid on an unarmed hazard that frost freezes is remembered from it
   }
 });
 
-test('a pebble resting in the notch of an L/J hazard is ignored although its side contact comes first', () => {
+test('a 1x1 probe cell resting in the notch of an L/J hazard is ignored although its side contact comes first', () => {
   // Box2D lists the side contact (against the raised cell) before the top one
   for (const [shape, pebX, push] of [['L0', 6, 6.5], ['J0', 8, -6.5]]) {
     for (const hazard of ['mine', 'spikes', 'glass']) {
       const s = restScene('DEDUPE');
       const h = s.mk(hazard, shape, 6, 0);
-      const peb = s.mk('pebble', 'P1', pebX, 1);
+      const peb = s.mk('normal', 'P1', pebX, 1);       // test-only probe shape
       s.step(4 * FRAME);
       peb.body.setLinearVelocity({ x: push, y: 0 });   // slides into the raised cell's side face
       s.step(1.5);
@@ -1135,7 +1194,7 @@ test('a pebble resting in the notch of an L/J hazard is ignored although its sid
         ny.push(Math.round((ce.contact.getFixtureA().getBody() === h.body ? 1 : -1) * wm.normal.y) || 0);
       }
       assert.deepStrictEqual(ny, [0, 1], what + ': side contact listed first, then the top one');
-      assert.ok(h.fx.ignoreIds.has(peb.id), what + ': the pebble resting on it is ignored');
+      assert.ok(h.fx.ignoreIds.has(peb.id), what + ': the 1x1 cell resting on it is ignored');
       if (hazard === 'glass') {
         E.onContact(s.game, solidRec(s.game, peb, h, { x: 0, y: -1 })); // its contact begins again
       } else {
@@ -1180,7 +1239,7 @@ test('vine weld anchors know their partner and disappear when it is destroyed', 
   assert.strictEqual(vine.fx.welds.length, 2);
   assert.ok(partners.includes(base) && partners.includes(side), 'anchors name their partners');
   assert.ok(vine.fx.welds.every((w) => w.joint && jointedTo(vine, w.partner)), 'and keep their joint');
-  g.physics.shatter(base);                          // the joint goes with the body
+  g.physics.removeBlock(base, 'smashed');           // the joint goes with the body
   g.run(FRAME);
   assert.ok(base.dead && !jointedTo(vine, base));
   assert.strictEqual(vine.fx.welds.length, 1, 'its anchor is dropped');

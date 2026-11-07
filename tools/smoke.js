@@ -69,6 +69,7 @@ async function session(name, viewport) {
   await page.evaluateOnNewDocument(() => {
     window.pickMove = function (game) {
       const TT = window.TT;
+      const mid = (TT.CONFIG.PLATFORM_X0 + TT.CONFIG.PLATFORM_X1) / 2;
       const surface = game._getSurface(true);
       const colTop = (x) => { const L = TT.Placement.landing(surface, TT.SHAPES.P1, x); return L.void ? -Infinity : L.y; };
       let best = null;
@@ -88,7 +89,7 @@ async function session(name, viewport) {
           }
           const com = x + shape.com.x;
           const tip = com > lo + 0.25 && com < hi - 0.25 ? 0 : 50;
-          const s = L.y + shape.h + holes * 2 + tip + Math.abs(x + shape.w / 2 - 8) * 0.1;
+          const s = L.y + shape.h + holes * 2 + tip + Math.abs(x + shape.w / 2 - mid) * 0.1;
           if (!best || s < best.s) best = { s, slot: i, x };
         }
       });

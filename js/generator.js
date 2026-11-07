@@ -90,8 +90,8 @@
         if (pool.length) typeKey = pickWeighted(pool, rType);
       }
 
-      const type = TT.BLOCK_TYPES[typeKey];
-      const shapeId = type.shape || TT.TETROMINO_IDS[Math.min(TT.TETROMINO_IDS.length - 1, Math.floor(rShape * TT.TETROMINO_IDS.length))];
+      // Every block is a tetromino, whatever its type
+      const shapeId = TT.TETROMINO_IDS[Math.min(TT.TETROMINO_IDS.length - 1, Math.floor(rShape * TT.TETROMINO_IDS.length))];
       return { n, typeKey, shapeId };
     }
 

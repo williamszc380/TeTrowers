@@ -1,7 +1,7 @@
 # TeTrowers — Architecture & Module Contracts
 
 TeTrowers is a single-player, physics-based tower-stacking game. You drop tetromino blocks
-(never rotated) onto a 6-wide platform and build as high as you can. Special blocks help (cold
+(never rotated) onto a 6.2-wide platform and build as high as you can. Special blocks help (cold
 colours) or hurt (warm colours); the bad ones become more likely the higher you build, so every run
 ends. It runs in desktop and Android browsers, works offline as a PWA, and is hosted on GitHub Pages.
 
@@ -56,7 +56,9 @@ js/particles.js  js/render.js  js/audio.js  js/input.js  js/ui.js  js/main.js
 ## 2. World model
 
 * 1 world unit = 1 cell = 1 metre. **y points up.** Field (where pieces can be dropped) is
-  `x ∈ [0, FIELD_WIDTH=16]`. Platform is static, `x ∈ [5, 11]`, top at `y = 0`, 6 deep.
+  `x ∈ [0, FIELD_WIDTH=16]`. Platform is static, `x ∈ [PLATFORM_X0, PLATFORM_X1] = [4.9, 11.1]`
+  (6.2 wide, centred; its edges are deliberately off the integer grid), top at `y = 0`, 6 deep. Code
+  reads the bounds from the config (or `physics.platform.x0 / x1`), never hard-codes them.
 * A piece's local origin is its **min cell corner** (bottom-left of its bounding box). A cell `[cx, cy]`
   occupies `[cx, cx+1] × [cy, cy+1]` locally. Body position = world position of that origin.
 * Canvas has y down: renderer maps `screenY = originY - (worldY - camBottom) * scale`, and a body angle
@@ -67,16 +69,18 @@ js/particles.js  js/render.js  js/audio.js  js/input.js  js/ui.js  js/main.js
 ### Block object (created by `physics.createBlock`, see js/physics.js)
 ```
 id, n (generator index or -1), typeKey, type (BLOCK_TYPES entry), shapeId, shape, cells,
-look (visual style key; rubble keeps the look of what it shattered from), tint (normal blocks: neutral
-family tint hex; rubble: inherited), cracked (bool, rubble), body (planck.Body), isPlatform:false,
+look (visual style key, the type key), tint (normal blocks: neutral family tint hex),
+body (planck.Body), isPlatform:false,
 dropped, dropTime, dropTurn, touched, touchTime,          // set by game
 settled, stillTime, settledFor, activated,                // set by game
 fallTurn, fallMoved   // set by game (absent until first set): turn in which the block was last set in
-                      // motion, null once calm again; time it last moved clearly. Rubble inherits both.
+                      // motion, null once calm again; time it last moved clearly.
 frozen: null | 'steel' | 'frost' | 'petrified',          // set via physics.makeStatic
-dead, deathReason ('lost'|'swallowed'|'exploded'|'melted'|'shattered'|...),
+dead, deathReason ('lost'|'swallowed'|'exploded'|'melted'|'popped'|'smashed'|'shattered'|...),
 fx: {}      // per-type state, OWNED BY effects.js (renderer reads it, see §4)
 guide       // assisted guided-fall state, owned by game.js
+gliding, landY, landOn, glideVy   // weightless glide (rule 5), owned by game.js: gliding until first
+                      // touch; predicted landing origin y and its support (null = none / void)
 lastVel     // velocity before the latest substep (impact strength)
 ```
 `physics.platform` is a pseudo-block `{ id: 0, isPlatform: true, typeKey: 'platform', body, frozen: 'platform', x0, x1, top }`.
@@ -84,13 +88,15 @@ lastVel     // velocity before the latest substep (impact strength)
 ### Physics API (implemented — read js/physics.js for details)
 `TT.Physics.create()` → `physics` with: `world, blocks[], movers[] (non-static live blocks), platform,
 time, stepCount, version, createBlock(spec, x, y, opts), removeBlock(block, reason),
-makeStatic(block, reason), weld(a, b, worldPoint), addSensors(block, rects, tag), shatter(block, force),
+makeStatic(block, reason), weld(a, b, worldPoint), addSensors(block, rects, tag),
 step(dt, {beforeSubstep, afterSubstep}), drainContacts(), touching(block), cellQuads(block),
 bounds(block), blocksInRadius(x, y, r), anyAwake()`.
 
+* **No 1×1 blocks in gameplay.** Nothing creates single-cell bodies (there is no `shatter` into
+  pieces any more): blocks that break (anvil smash, glass) are removed whole.
 * **Never mutate the world from a planck callback.** Contacts are queued; game.js drains them after each
   substep and hands them to effects.js, at which point the world is unlocked and effects may freely
-  create/destroy/shatter/freeze/weld. Always check `block.dead` — an earlier event may have killed it.
+  create/destroy/freeze/weld. Always check `block.dead` — an earlier event may have killed it.
 * **Never use `fixture.getAABB()` for gameplay geometry** — it is Box2D's *fattened* broadphase box
   (+0.1 m). Use `physics.cellQuads(block)` / `physics.bounds(block)` (exact, cached while still).
 * Collision shapes are deliberately forgiving: outer side faces are inset 0.02 per side and convex outer
@@ -103,16 +109,19 @@ bounds(block), blocksInRadius(x, y, r), anyAwake()`.
 1. **Batches.** Each round deals `BATCH_SIZE = 3` blocks (generator, using the run's best height at deal
    time). The player may place them in any order. When all 3 are used, the next batch is dealt as soon
    as the drop is ready again. Portrait screens show the batch tray at the bottom; wide screens on the right.
-2. **Shapes** are the 19 fixed tetromino orientations, uniformly random. No rotation. Pebble is 1×1.
+2. **Shapes**: every block, normal or special, is one of the 19 fixed tetromino orientations
+   (`TT.TETROMINO_IDS`, order fixed: seeds depend on it), uniformly random. No rotation. **No 1×1
+   blocks in gameplay**: no type forces a shape, and `TT.SHAPES.P1` (one cell) exists only as a probe
+   for tests and tools — it is never dealt, never any type's shape and never created by game code.
 3. **Categories by height** (`Generator.odds(h)`, h = floor(best height)): negative 5% → 70% (+1.1%/m),
    positive 22% → 4% (−0.45%/m), the rest normal. Types unlock at heights (see blocktypes.js).
    Special types can be individually disabled in the main menu (all enabled by default); a disabled
    pick is re-rolled among enabled types of that category, or becomes normal if none are enabled.
 4. **Placement modes** (Ctrl cycles assisted → fixed → manual; default assisted):
-   * **assisted** — left/right step between positions where the piece's cell grid lines up with the grid
-     of the block it would land on (so edges are flush even when the tower has drifted). Where it would
-     land on nothing / only the platform / a block tilted more than `ALIGN_MAX_TILT`, it uses half-block
-     steps. On release, x is first re-snapped against a fresh surface (the one it was chosen on can be
+   * **assisted** — left/right step through the half-block grid **plus** every position where one of
+     the piece's edges lines up with a top corner of the blocks below it (at their real, drifted
+     position) or with an edge of the platform, so edges can be made flush even when the tower has
+     drifted (see §6 for the exact rules). On release, x is first re-snapped against a fresh surface (the one it was chosen on can be
      `SURFACE_INTERVAL` old). Then the falling piece is **guided**: until first contact its horizontal
      velocity = the landing spot's own velocity (feed-forward) + `GUIDE_GAIN` × the distance to it, at
      most `GUIDE_MAX_SPEED`, so if the block below shifts or keeps drifting during the fall the piece
@@ -122,10 +131,23 @@ bounds(block), blocksInRadius(x, y, r), anyAwake()`.
    * **fixed** — half-block steps (`FIXED_STEP = 0.5`), no guidance.
    * **manual** — pixel-precise: a key tap moves one screen pixel (`game.pixelSize` world units), holding
      slides and accelerates; a dragged block follows the pointer to the pixel. No guidance.
-5. **Dropping.** Space / Enter, or letting go of a block dragged out of the tray over the playfield
-   (touch and mouse alike; see §7 `TT.Input`), releases the piece from the hover line (`DROP_GAP`
-   above the tower top, never below `MIN_HOVER_Y`). Falling speed is capped at
-   `MAX_FALL_SPEED` until first contact. The next drop is allowed once the previous block has settled,
+5. **Dropping.** Space / Enter, or letting go of a drag over the playfield — one that picked a block
+   up in the tray or one on the playfield with the selected block (touch and mouse alike; see §7
+   `TT.Input`) — releases the piece from the hover line (`DROP_GAP`
+   above the tower top, never below `MIN_HOVER_Y`). **Dropped blocks have no weight until they first
+   touch something** (user requirement: a landing must not jolt the tower). game.js predicts the
+   landing at release (`Placement.landing` on the fresh surface → `block.landY`, `block.landOn`), sets
+   the body's gravity scale to 0 and drives its vertical velocity before every substep: `GLIDE_SPEED`
+   (7 m/s, from the start: no acceleration), easing linearly with the remaining height to
+   `SOFT_LAND_SPEED` (0.8 m/s) over the last `SOFT_LAND_DIST` (1.5) above `landY`, so it touches down
+   at about 0.8 m/s. Without a landing (void) it glides at `GLIDE_SPEED` until lost. If it passes
+   `SOFT_LAND_MISS` (0.5) below `landY` without touching, its predicted support dies, or (assisted) the
+   guide gives up, the landing is predicted again from where it is. On first touch, or when it is lost,
+   a blast changes its glide (a speed change of more than 0.25 m/s between substeps), or the run ends,
+   its gravity scale is back to 1 and it settles under its own weight like every other block. The
+   horizontal guidance above is unchanged. **Heavy types** (`BLOCK_TYPES[k].heavy`: the anvil and rubber)
+   fall with full gravity instead, released at `DROP_START_SPEED` and capped at `MAX_FALL_SPEED` until
+   first contact. The next drop is allowed once the previous block has settled,
    or `READY_AFTER_TOUCH` s after it first touched something, or it died, or `READY_MAX` s passed (and at
    least `READY_MIN` s after the drop) — **and** no other block is still in motion (see rule 6: set in
    motion and not yet calm for `FALL_END_TIME`; the just-dropped piece counts once it has touched
@@ -140,7 +162,7 @@ bounds(block), blocksInRadius(x, y, r), anyAwake()`.
    turn is charged at most once (a set of charged turns). A block lost without such a record is charged
    to the current turn. With the readiness wait of rule 5 a collapse plays out within the turn that
    caused it, so one drop normally never costs two hearts. Turn 0 (before the first drop) costs
-   nothing. Swallowed / exploded / melted / popped blocks are *not* lost. At 0 lives the run ends (game
+   nothing. Swallowed / exploded / melted / popped / smashed / shattered blocks are *not* lost. At 0 lives the run ends (game
    over after ~1.5 s so the collapse plays out).
 7. **Recovery.** Every time best height passes a multiple of `LIFE_MILESTONE` (10 m) the player gains a
    life (up to max). Crystal Heart gives +1 life, or a shield at full lives.
@@ -159,18 +181,17 @@ bounds(block), blocksInRadius(x, y, r), anyAwake()`.
 | vine | + | On settle: welds itself to every block (and the platform) it touches. `fx.welds = [{x, y, partner, joint}]`: local anchor points for drawing, with the welded block and the joint. An anchor is dropped (in `Effects.update`, whenever `physics.version` changed) once its partner is dead or its joint is gone, so the renderer can draw every entry. |
 | crystal | + | On settle: `game.gainLife('crystal')`, else `game.addShield()`. `fx.used = true`. |
 | frost | + | On settle: becomes static ('frost') and freezes every dynamic block it touches ('frost'). |
-| pebble | − | 1×1 cell (shape forced). No behaviour. |
-| crumble | − | On first touch: shatters itself into 1×1 rubble. |
 | oil | − | Friction 0 (material). No behaviour. |
 | mine | − | On settle: `fx.armed = true`. When a non-sensor contact begins with a block **above** it (normal from mine to other has y > 0.5) it lights: `fx.fuse = MINE_FUSE`; when the fuse runs out it explodes (`Effects.explode`) and is removed ('exploded'). Static blocks are not pushed. Blocks already resting on top at arming are ignored for good (`fx.ignoreIds`): every touching solid contact with an upward normal (not just the first per neighbour), plus resting blocks with a cell flush on top of one of its cells (no contact needed: freezing either body destroys it). Before frost or steel freezes anything, each unarmed mine / glass / spikes in contact records what rests on it (`fx.restingIds`), so a block frozen before it settles still ignores its lid. |
 | magma | − | On settle: `fx.turnsLeft = MAGMA_TURNS`. At each turn start (drop) it decrements; at 0 it is removed ('melted'). Works even if frozen. |
-| anvil | − | Density 4. On first touch, and for `ANVIL_IMPACT_WINDOW` s after, every dynamic block it touches **below** it (normal y < −0.5) is shattered (`physics.shatter`). Mines are not shattered (they detonate instead). |
+| anvil | − | Density 4, `heavy: true`: falls with its full weight (rule 5). **Smashes**: on first touch, and for `ANVIL_IMPACT_WINDOW` s after, every dynamic, alive block it lands on (**below** it: normal anvil→other y < −0.5) is destroyed: emit `shatter {x, y, count: 1, cause: 'anvil', block}` BEFORE `physics.removeBlock(other, 'smashed')`. Not a loss (no life). Mines detonate instead, spikes pop the anvil, other anvils and static blocks are immune. |
 | blackhole | − | On settle: adds horizon sensors (tag `'horizon'`) one cell wide beside every side face of its cells (`HORIZON_SIZE` square, centred in the neighbour cell). Blocks overlapping at activation (first `HORIZON_GRACE_STEPS` substeps) are spared forever (`fx.spared` Set of ids). Afterwards any dynamic, non-blackhole block touching a horizon is swallowed (removed 'swallowed', no life lost). `fx.active = true`, `fx.horizonCells = [[cx, cy], ...]` local neighbour cells for drawing. |
 | magnet | + | On settle: for `MAGNET_TIME` s pulls every dynamic, alive block with a cell centre within `MAGNET_RADIUS` of the magnet's cells (and tilted ≤ `MAGNET_MAX_TILT` from the magnet's grid, modulo quarter turns) onto the magnet's grid: horizontal velocity and angular velocity are steered toward the nearest grid-aligned pose (x snapped to the magnet's lattice, angle snapped to the magnet's angle + k·90°); vertical motion is left to gravity/contacts. Gain `MAGNET_GAIN`, cap `MAGNET_MAX_SPEED`. Emits `magnet {block, x, y, count}`; `fx.used = true`, `fx.pullUntil`, `fx.targets` (ids). |
-| rubber | − | Material only: restitution 0.55 (Box2D mixes restitution with max(), so blocks landing on rubber bounce too). No handler. |
-| glass | − | On settle: `fx.armed = true` (blocks already resting on top at that moment are ignored, exactly as for the mine). When a non-sensor contact begins with a dynamic block **above** it (normal glass→other y > 0.5), the glass shatters into 1×1 rubble (`physics.shatter`; static glass is immune) and emits `shatter {x, y, count, cause: 'glass'}`. |
+| rubber | − | Material: restitution 0.55, `heavy: true` so it falls with full weight (rule 5) and really bounces when it lands. No handler. Weightless blocks touch down on it at about `SOFT_LAND_SPEED`, so they barely bounce. |
+| glass | − | On settle: `fx.armed = true` (blocks already resting on top at that moment are ignored, exactly as for the mine). When a non-sensor contact begins with a dynamic block **above** it (normal glass→other y > 0.5), the glass **shatters away**: emit `shatter {x, y, count: 1, cause: 'glass', block: glass}` BEFORE `physics.removeBlock(glass, 'shattered')`; the block on top falls into the gap. Static (frozen / petrified) glass is immune. |
 | spikes | − | On settle: `fx.active = true` (blocks already resting on top are ignored, exactly as for the mine). When a non-sensor contact begins with a dynamic block **above** it (normal spikes→other y > 0.5), that block is destroyed ('popped', no life lost): emit `pop {block, x, y, spikes}` BEFORE removing it. Works when static. |
-| rubble | internal | Output of shattering; no behaviour. |
+
+`game.stats.shattered` counts anvil smashes and glass breaks alike.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -225,7 +246,7 @@ destroy()
 | `move` | `{ x }` (only when x actually changed) |
 | `mode` | `{ mode }` |
 | `drop` | `{ block, x, y }` |
-| `land` | `{ block, x, y, impact }` (first touch; impact = speed m/s before contact) |
+| `land` | `{ block, x, y, impact }` (first touch; impact = speed m/s before contact, at least `SOFT_LAND_IMPACT` (2.5) for a weightless block, so its soft touchdown is still heard) |
 | `settle` | `{ block }` (first settle) |
 | `ready` | `{}` (drop allowed again; once per turn, never during the game-over delay) |
 | `blockLost` | `{ block, x, y }` |
@@ -238,7 +259,7 @@ destroy()
 | `explode` | `{ x, y, radius }` |
 | `fuse` | `{ block, x, y }` |
 | `mineArmed` | `{ block }` |
-| `shatter` | `{ x, y, count, cause: 'anvil' | 'crumble' | 'glass' }` |
+| `shatter` | `{ x, y, count: 1, cause: 'anvil' | 'glass', block }` (`block` = the smashed block / the glass that broke, still alive: emitted before removal) |
 | `swallow` | `{ block, x, y, hole }` (`hole` = the black hole block) |
 | `freeze` | `{ blocks, source: 'steel' | 'frost', x, y }` |
 | `weld` | `{ block, points: [{x, y}] }` (world points) |
@@ -293,10 +314,12 @@ snapX(surface, shape, mode, x) → x
 clampX(shape, x) → x                          // [0, FIELD_WIDTH - shape.w]
 guideTarget(surface, shape, x) → { block, local: {x, y} } | null   // assisted guided fall target
 ```
-Assisted validity: a candidate x is valid if (a) the primary support is a block with |angle| ≤
-`ALIGN_MAX_TILT` and the piece grid is aligned with that block's grid (`ALIGN_EPS`), or (b) there is no
-such support (void / platform / tilted) and x is on the half-block grid. Candidate seeds: half-grid
-positions plus `edge + k` for each support block's cell edge.
+Assisted candidates (user requirement: half-block granularity **plus** the corners of the blocks
+below): the half-block grid, plus every x where one of the piece's column boundaries (`x + j`,
+`j = 0..w`) lines up with a corner below it: a top corner of a block on the skyline, at its world x (so
+drifted and tilted blocks are followed), or an edge of the platform. Positions that are practically the
+same spot are merged and a corner-aligned one beats a grid one; the header of js/placement.js has the
+exact rules.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -311,19 +334,27 @@ r.render(dt)                 // draw one frame
 r.isAnimating() → bool       // particles/shake/camera still moving (for idle throttling)
 r.screenToWorld(px, py) / r.worldToScreen(x, y)
 r.scale                      // CSS px per cell
+r.setDragCue({ active, cancel })   // the block in hand (from ui.js, mirroring TT.Input's cue): while
+                             // cancel is set the hovering piece is drawn inactive (35% opacity, greyed,
+                             // a bold red ✕ over it) and the ghost is hidden; null / inactive clears it.
+                             // Reset by setGame; ui.js resets it when the drag ends (drop, cancel,
+                             // pause, game over, restart) and the cancel look only shows while playing.
 TT.Renderer.drawPreview(canvas, spec, opts)   // static helper: draws a block spec centred in a small canvas (batch slots, codex)
 ```
 * View is `VIEW_CELLS_WIDE` (18) cells wide; on wide canvases at least `VIEW_MIN_ROWS` rows tall.
   Camera eases so the hovering piece and ~2 cells above it stay in view; never shows below y ≈ −4.
-* Draws: sky gradient that darkens toward space with altitude (stars at height), platform + pillar,
+* Draws: sky gradient that darkens toward space with altitude (stars at height), platform + pillar
+  (from `PLATFORM_X0..X1`, any width: slab stones and bricks are spread evenly over it),
   height ruler on the side, next-milestone dashed line ("+♥ 20 m"), best-height marker, blocks (per-type
-  look + icons: rivets, leaf, snow, heart, mine with blinking light, flame + magma countdown number,
-  anvil, swirl, drop, pebble, cracks), frozen/petrified overlays, vine tendrils at `fx.welds`, black-hole
-  horizon swirl at `fx.horizonCells` when `fx.active`, lit-mine flashing, the hovering piece, the ghost
-  (outline at landing, red with an icon when warnings include void/mine/horizon), particles, screen shake.
+  look + icons: rivets, leaf, snow, heart, magnet, mine with blinking light, flame + magma countdown
+  number, anvil, black-hole ring, drop, bounce, glass glint, spike studs), frozen/petrified overlays, vine tendrils
+  at `fx.welds`, black-hole horizon swirl at `fx.horizonCells` when `fx.active`, lit-mine flashing, the
+  hovering piece, the ghost (outline at landing, red with an icon when warnings include
+  void/mine/horizon), particles, screen shake. A `shatter` event bursts its `block` into shards in that
+  block's colours (glass: glinting slivers) with a short fade.
 * **Culling is mandatory**: only blocks whose `physics.bounds()` intersect the view are drawn, so cost is
   bounded by the view size, not the tower height (500+ blocks). Cell sprites are pre-rendered per
-  (look, tint, cracked, scale) and blitted with the body transform. Optionally, static blocks may be
+  (look, tint, scale) and blitted with the body transform. Optionally, static blocks may be
   cached into chunk canvases (`STATIC_CHUNK_ROWS` rows, small LRU) if measurement shows a win; animated
   overlays (magma number, lit mine, horizon swirl) are always drawn per frame on top.
 
@@ -333,13 +364,21 @@ Kinds: dust, explosion, smoke, shards, swirl, drip, sparkle, leaf, text (floatin
 
 ### `js/audio.js` — `TT.Audio`
 WebAudio synthesis only (no audio files). `TT.Audio.init()`, `unlock()` (call from a user gesture),
-`setMuted(b)`, `isMuted()`, `play(name, opts)`, `attach(game)` (subscribe to events), `detach()`.
+`setMuted(b)`, `isMuted()`, `play(name, opts)`, `attach(game)` (subscribe to events), `detach()`,
+`setHaptics(b)` / `vibrate(ms | pattern, prio)` (no-op when vibration is off), `SOUND_NAMES`.
+Landings (`land` event): a weightless block landing slower than 4 m/s plays `set`, a soft "set down"
+tap coloured by its material; heavy blocks (anvil, rubber) and anything that hits harder play the `land`
+thud, scaled by impact and mass. Only heavy landings vibrate (`HAPTIC_LAND_MS`): every anvil landing,
+or impact × mass factor ≥ `HAPTIC_LAND_IMPACT`. UI-only
+sounds played through `App.sfx(name)`: `click`, and `cancel` (a short quiet descending blip,
+rate-limited) when a drag is let go in the cancel zone.
 
 ### `js/input.js` — `TT.Input`
 `TT.Input.create({ canvas, tray, getGame, getRenderer, isBlocked, onPause, onOdds, onMute, onActivity })`;
 `update(dt)` once per frame (after `game.update`), `isActive()`, `releaseAll()` / `reset()`, `destroy()`,
-`cue` (read-only, polled by ui.js every frame): `{ slot: lifted slot | -1, zone: 'field' | 'cancel' | '',
-queued: bool }`. Also exported: `TT.Input.keyAction(e)`, `TT.Input.selectPrev(game)`.
+`cue` (read-only, polled by ui.js every frame): `{ slot: slot of the block in hand | -1, zone: 'field' |
+'cancel' | '' (no drag), queued: bool, cancels: number of drags let go in the cancel zone so far (only
+grows) }`. Also exported: `TT.Input.keyAction(e)`, `TT.Input.selectPrev(game)`.
 
 Keyboard: ←/→ move (assisted/fixed: tap = one step, hold repeats after `KEY_REPEAT_DELAY` every
 `KEY_REPEAT_RATE`; manual: tap = 1 px, hold slides from `MANUAL_SPEED_MIN` to `MANUAL_SPEED_MAX` cells/s),
@@ -350,24 +389,29 @@ pause, O odds, M mute, 1-3 select slot. ↓ never drops. Space / Enter on a cont
 press never keeps the keys (a press on the playfield also blurs it). Nothing drops while paused, over or
 with a menu open.
 
-Pointer — **drag and drop from the tray is the only pointer way to drop**, identical for mouse, touch and
-pen (pointer events; moves are coalesced and applied once per frame in `update`, the zone under the
-pointer comes from `document.elementFromPoint`: the canvas = playfield, inside `tray` = tray, else out):
-* A press on a `[data-slot]` button in `tray` selects that slot at once (`game.selectSlot`; a tap ends
-  there and never drops) and takes pointer capture. Once its *path length* reaches `DRAG_START_PX` (8 CSS
-  px) the block is lifted (`cue.slot`). Over the playfield the piece follows the pointer sideways,
-  `game.setTargetX(worldX − piece.shape.w / 2)` (it stays on the hover line); over the tray or anywhere
-  else (`cue.zone = 'cancel'`) it is back at its pick-up x.
+Pointer — **the drag rule**, identical for mouse, touch and pen (pointer events; moves are coalesced and
+applied once per frame in `update`, the zone under the pointer comes from `document.elementFromPoint`:
+the canvas = playfield = the drop zone; the tray, the HUD / sidebar and outside the window = the cancel
+zone; overlays with `pointer-events: none`, like toasts and, during a drag, the portrait odds chip, are
+see-through):
+* A drag starts on a `[data-slot]` button in `tray` (the press selects that slot at once with
+  `game.selectSlot`) **or on the playfield** (it takes the block that is selected at that moment; with no
+  block in play it does nothing). The press takes pointer capture. Once its *path length* reaches
+  `DRAG_START_PX` (8 CSS px) the block is in hand (`cue.slot`). Over the playfield (`cue.zone = 'field'`)
+  the piece follows the pointer sideways, `game.setTargetX(worldX − piece.shape.w / 2)` (it stays on the
+  hover line); in the cancel zone (`cue.zone = 'cancel'`) it is back at its pick-up x.
 * Letting go over the playfield aims at the release point and drops (`game.drop()`). When the drop is not
   allowed yet (`!game.canDrop`), it is queued instead (`cue.queued`, no `deny`): `update` drops it once
-  `canDrop` turns true, provided the same piece object is still in hand. Any new tray press or drag, a
-  key move / selection, another selection made elsewhere (the piece object changes), pause, a menu or
-  `releaseAll` cancels the queued drop; a plain tap on the playfield does not.
-* Letting go anywhere else (tray, HUD, sidebar, outside the window), `pointercancel`, a lost capture of the
-  slot itself, window blur or the page being hidden cancel: nothing drops, the piece goes back to its
-  pick-up x. A press on a used / empty slot does nothing at all.
-* A drag that starts on the playfield moves the piece relative to where it was when the drag began
-  (`game.setTargetX(pieceX + dx / scale)`) and **never drops**; a tap or click on the playfield does nothing.
+  `canDrop` turns true, provided the same piece object is still in hand. Any new tray press or drag (a
+  playfield drag too: let go over the playfield it queues anew), a key move / selection, another
+  selection made elsewhere (the piece object changes), pause, a menu or `releaseAll` cancels the queued
+  drop; a plain tap on the playfield does not.
+* Letting go in the cancel zone cancels: nothing drops, the piece goes back to its pick-up x and
+  `cue.cancels` grows by one (ui.js: "Cancelled" + the `cancel` sound). `pointercancel`, a lost capture of
+  the slot itself, window blur, the page being hidden, pause, a menu or game over end the drag quietly
+  the same way (no sound). A press on a used / empty slot does nothing at all.
+* A tap that never reaches `DRAG_START_PX` never drops: on a slot it only selects, on the playfield it
+  does nothing.
 * One gesture at a time: other pointers are ignored while a press is active (multi-touch).
 * Only presses with the primary button / a touch / a pen contact play, and only as described above: a
   pointer that is merely moving changes nothing. The context menu is suppressed on the canvas and the
@@ -378,19 +422,32 @@ pointer comes from `document.elementFromPoint`: the canvas = playfield, inside `
 Screens: title (Play, Daily Challenge, Enter Seed, Special Blocks, How to Play, Settings, best score),
 seed entry, special-blocks toggles (grouped positive/negative with previews + descriptions, All on/off,
 default all on), how-to-play (controls + rules + block codex), settings (default mode, sound, vibration,
-ghost preview, reduced motion), HUD (lives + shield, height/best, mode button, pause, odds, seed),
+ghost preview, reduced motion), HUD (lives + shield, height/best, mode button, pause, odds, seed, and
+a **"?" button in a top corner** that opens the special-block explorer during play),
 batch tray (3 big slots with previews, at least 64 px each way on phones, selected highlight, used
-dimmed, the selected block's description), a drag hint and key hints in the wide sidebar
+dimmed, the selected block's description; a special block's slot carries a **small "?" badge on its
+top corner** that opens that block's info card), a drag hint and key hints in the wide sidebar
 (keys hidden on touch-only devices and below 720 px of height, the drag hint below 560 px), pause overlay
 (resume, block odds, **Restart** + "Same seed" box, how to play, settings, quit to menu), game-over (best
 height, time, drops, seed + rules, new best, **Play again** + "Same seed" box, copy result, menu),
 first-time "new block" toasts and a one-time "Drag a block onto the playfield" tip (`Seen` key `#drag`).
-Drag cues (ui.js mirrors `input.cue`, touching the DOM only on change): the lifted slot gets `.is-lifted`
-(dashed outline); `#hud-tray` gets `.is-dragging` over the playfield ("Let go over the playfield to drop
-it · drag back here to cancel") or `.is-cancel` elsewhere ("Release to cancel", tray highlighted), shown
-in `#tray-cue` over the description; `.app.is-dragging` sets the grabbing cursor; `#drop-cue` ("Dropping
-when ready" + a `readyProgress` bar) is placed above the hovering piece (below it when there is no room)
-while a drop is queued. Slot clicks with `detail > 0` are TT.Input's; keyboard activation selects.
+**Cancel cue** — every drag, switching at once (same frame) as it crosses between the drop zone and the
+cancel zone; ui.js mirrors `input.cue`, touching the DOM only on change:
+* the block in hand's slot gets `.is-lifted` (dashed outline, preview faded); `.app.is-dragging` sets the
+  grabbing cursor, shows a boundary line on the playfield edge next to the tray / sidebar (`.stage::after`:
+  subtle, red under `.app.is-drag-cancel`) and makes the portrait odds chip see-through;
+* drop zone: `#hud-tray.is-dragging`, a calm hint in `#tray-cue` over the description ("Let go to drop ·
+  drag back here to cancel"); the renderer draws the piece and its ghost normally;
+* cancel zone: `#hud-tray.is-cancel` turns into the cancel target (warm red tint, dashed red outline,
+  "✕ Release to cancel" in bold at 20 px, 18 px in the sidebar, the block shown back in its slot);
+  `renderer.setDragCue({ active: true, cancel: true })` greys out and crosses the piece and hides its
+  ghost; entering it from the playfield vibrates once (`CANCEL_BUZZ_MS` = 10 ms, `TT.Audio.vibrate`, so
+  the Vibration setting applies);
+* `cue.cancels` grew (let go in the cancel zone): `App.sfx('cancel')` and "Cancelled" in `#tray-cue`
+  (`#hud-tray.is-cancelled`, 0.8 s); the drag ending in any way resets every cue and the renderer cue.
+`#drop-cue` ("Dropping when ready" + a `readyProgress` bar) is placed above the hovering piece (below it
+when there is no room) while a drop is queued. Slot clicks with `detail > 0` are TT.Input's; keyboard
+activation selects.
 Restart / Play again start a **new random seed** by default, keeping the run's mode and block set. The
 "Same seed (SEED)" checkbox beside each of them (unticked by default) replays the current seed instead; both
 boxes are bound to the saved setting `settings.restartSameSeed` (`data-setting="restartSameSeed"`; settings

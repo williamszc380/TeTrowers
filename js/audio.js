@@ -21,6 +21,8 @@
   const HAPTIC_GLASS_MS = (C.HAPTIC_GLASS_MS != null ? C.HAPTIC_GLASS_MS : 20);
   const FIELD_WIDTH = C.FIELD_WIDTH || 16;
   const FALL_SPEED = C.MAX_FALL_SPEED || 9;
+  const SOFT_IMPACT = (C.SOFT_LAND_IMPACT != null ? C.SOFT_LAND_IMPACT : 2.5); // what a gentle touchdown reports
+  const SOFT_TAP_MAX = 4;            // m/s; weightless blocks landing slower than this tap instead of thud
   const FUSE_TIME = C.MINE_FUSE || 0.35;
   const MILESTONE_LIFE_DELAY = 0.42; // s; the milestone life chime lands inside the fanfare's last chord
 
@@ -156,9 +158,6 @@
   // Landing character per block type: body pitch, knock brightness, optional ring partials
   const MATERIALS = {
     normal: { pitch: 1, cut: 900, body: 1, knock: 1 },
-    rubble: { pitch: 1.3, cut: 1500, body: 0.6, knock: 1 },
-    pebble: { pitch: 1.7, cut: 2200, body: 0.45, knock: 0.9 },
-    crumble: { pitch: 1.1, cut: 1700, body: 0.7, knock: 1.3 },
     oil: { pitch: 0.9, cut: 600, body: 0.9, knock: 0.5 },
     vine: { pitch: 0.95, cut: 650, body: 0.85, knock: 0.7 },
     magma: { pitch: 0.9, cut: 750, body: 0.9, knock: 0.7 },
@@ -188,6 +187,7 @@
     return block.cells.length * density;
   }
   const massFactor = (block) => clamp(Math.sqrt(massOf(block) / 4), 0.5, 2); // 1 = plain tetromino
+  const isHeavy = (block) => !!(block && block.type && block.type.heavy);   // falls with full weight (anvil)
 
   function brass(K, dest, t, f, hold, d, v) {
     K.tone(dest, t, { f, type: 'sawtooth', a: 0.015, hold, d, v });
@@ -214,6 +214,23 @@
       if (m.ring) {
         for (let i = 0; i < m.ring.length; i++) {
           K.tone(out, t, { f: m.ring[i] * o.p, a: 0.001, d: m.ringD * (1 - i * 0.15), v: m.ringV * g });
+        }
+      }
+    } },
+
+    // Weightless touchdown: a soft "set down" tap (a muted knock and a tiny contact click),
+    // coloured by the material; no thud, since nothing that glides down has any weight
+    set: { gap: 0.03, rate: 8, cap: 4, prio: 0, vary: 0.06, fn(K, out, t, o) {
+      const m = MATERIALS[o.typeKey || (o.block && o.block.typeKey)] || MATERIALS.normal;
+      const impact = typeof o.impact === 'number' ? o.impact : SOFT_IMPACT;
+      const g = clamp(impact / SOFT_IMPACT, 0.7, 1.4);           // 1 for an ordinary touchdown
+      const p = o.p * m.pitch / Math.sqrt(massFactor(o.block)); // bigger blocks tap lower
+      K.tone(out, t, { f: 330 * p, f1: 230 * p, glide: 0.04, a: 0.0015, d: 0.06, v: 0.2 * g * m.body });
+      K.tone(out, t, { f: 165 * p, a: 0.002, d: 0.05, v: 0.08 * g * m.body });
+      K.hiss(out, t, { type: 'bandpass', f: m.cut * 2 * o.p, q: 0.9, a: 0.0008, d: 0.016, v: 0.12 * g * m.knock });
+      if (m.ring) {
+        for (let i = 0; i < m.ring.length; i++) {
+          K.tone(out, t, { f: m.ring[i] * o.p, a: 0.001, d: m.ringD * 0.5 * (1 - i * 0.15), v: m.ringV * 0.45 * g });
         }
       }
     } },
@@ -447,6 +464,12 @@
     click: { gap: 0.025, prio: 0, vary: 0.04, fn(K, out, t, o) {
       K.tone(out, t, { f: 1500 * o.p, f1: 950 * o.p, glide: 0.02, a: 0.001, d: 0.028, v: 0.14 });
       K.hiss(out, t, { type: 'highpass', f: 4000, a: 0.001, d: 0.008, v: 0.05 });
+    } },
+
+    // Short quiet descending blip: a drag was let go outside the playfield, nothing dropped
+    cancel: { gap: 0.12, rate: 3, cap: 2, vary: 0.03, fn(K, out, t, o) {
+      K.tone(out, t, { f: 740 * o.p, f1: 392 * o.p, glide: 0.09, type: 'triangle', a: 0.004, d: 0.1, v: 0.075 });
+      K.tone(out, t, { f: 1480 * o.p, f1: 784 * o.p, glide: 0.06, a: 0.002, d: 0.05, v: 0.012 });
     } },
 
     // Soft two-pulse buzz: not allowed (yet)
@@ -707,7 +730,7 @@
   }
 
   // Play a named sound. opts: { x (world x, pans), pitch, volume, delay (s), ...sound specific:
-  // impact + block | typeKey (land), impact + block (boing), index (select), mode (mode),
+  // impact + block | typeKey (land, set), impact + block (boing), index (select), mode (mode),
   // round (newBatch), count + cause (shatter), count (glass, magnet), block (pop),
   // source (freeze) }. Returns true if it was scheduled.
   function play(name, opts) {
@@ -805,12 +828,15 @@
     },
     mode(p) { play('mode', { mode: p.mode }); },
     drop(p) { play('drop', { x: p.x }); },
+    // Weightless blocks set down with a soft tap; the anvil (or anything that hit fast) thuds
     land(p, g) {
       const impact = typeof p.impact === 'number' ? p.impact : FALL_SPEED * 0.8;
-      play('land', { x: p.x, impact, block: p.block });
+      const heavy = isHeavy(p.block);
+      play(!heavy && impact < SOFT_TAP_MAX ? 'set' : 'land', { x: p.x, impact, block: p.block });
       const spring = rubberBounce(p.block, g);
       if (spring) play('boing', { x: p.x, impact, block: p.block, volume: spring });
-      if (impact * massFactor(p.block) >= HAPTIC_LAND_IMPACT) vibrate(HAPTIC_LAND_MS, 0);
+      // Only heavy landings buzz, and an anvil always lands with its full weight
+      if (heavy || impact * massFactor(p.block) >= HAPTIC_LAND_IMPACT) vibrate(HAPTIC_LAND_MS, 0);
     },
     // Deferred to the end of the frame: 'ready' and 'newBatch' often arrive together
     ready() {
@@ -831,14 +857,16 @@
       vibrate(HAPTIC_EXPLODE_MS, 1);
     },
     fuse(p) { play('fuse', { x: p.x }); },
-    // Ruby glass breaks with its own tinkle; anvil and crumble keep the crack
+    // Ruby glass breaks with its own tinkle; a block smashed by an anvil cracks. Sized by the
+    // broken block's cells (p.block, still alive when the event fires).
     shatter(p) {
+      const count = p.block && p.block.cells ? p.block.cells.length : p.count;
       if (p.cause === 'glass') {
-        play('glass', { x: p.x, count: p.count });
+        play('glass', { x: p.x, count });
         vibrate(HAPTIC_GLASS_MS, 1);
         return;
       }
-      play('shatter', { x: p.x, count: p.count, cause: p.cause });
+      play('shatter', { x: p.x, count, cause: p.cause });
     },
     pop(p) {
       play('pop', { x: p.x, block: p.block });

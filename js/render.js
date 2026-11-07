@@ -3,8 +3,9 @@
  * Draws one frame from the game's read-only state (ARCHITECTURE.md §4, §7): an altitude-
  * shifting sky (mountains and clouds near the ground, stars higher up), the platform, every
  * visible block, per-frame animated overlays (mine lights, magma countdown, vine welds,
- * black-hole horizons), the hovering piece with its ghost and warnings, particles, a height
- * ruler and the next life milestone. Game events drive particles and screen shake.
+ * black-hole horizons), the hovering piece with its ghost and warnings (greyed out and crossed,
+ * without a ghost, while a drag would be cancelled: setDragCue), particles, a height ruler and the
+ * next life milestone. Game events drive particles and screen shake.
  *
  * Every block reads as one piece: it is painted as a single sprite with a dark outline round
  * its silhouette (the union of its cells), a bevel along that silhouette only, a texture that
@@ -14,7 +15,7 @@
  * Performance model (500+ block towers on phones):
  *  - The world scale is a whole number N of device pixels per cell, and unrotated bodies are
  *    pixel-snapped, so pre-rendered piece sprites blit 1:1 (crisp and cheap).
- *  - A whole piece is painted once per (N, shape, look, tint, variant, cracked, overlay, state)
+ *  - A whole piece is painted once per (N, shape, look, tint, variant, overlay, state)
  *    into an LRU-capped cache, so drawing a block is one drawImage. Textures come from seamless
  *    tiles painted once per (look, N), so a new sprite is cheap to make as well. Painting is
  *    budgeted per frame: after a resize, blocks keep their old sprite (scaled) until repainted.
@@ -75,8 +76,7 @@
 
   const ANIMATED = Object.freeze({ mine: true, magma: true, vine: true, blackhole: true, magnet: true });
   const GLOW = Object.freeze({
-    positive: 'rgba(150,228,255,0.8)', negative: 'rgba(255,150,100,0.8)',
-    normal: 'rgba(255,255,255,0.6)', internal: 'rgba(255,255,255,0.6)'
+    positive: 'rgba(150,228,255,0.8)', negative: 'rgba(255,150,100,0.8)', normal: 'rgba(255,255,255,0.6)'
   });
 
   // ---- Colour helpers ---------------------------------------------------------------------
@@ -90,7 +90,6 @@
   function mix(c, d, t) {
     return [Math.round(c[0] + (d[0] - c[0]) * t), Math.round(c[1] + (d[1] - c[1]) * t), Math.round(c[2] + (d[2] - c[2]) * t)];
   }
-  function grey(c) { const l = Math.round(c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11); return [l, l, l]; }
   function css(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
   function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (+a).toFixed(3) + ')'; }
   function hex(c) { return '#' + ((1 << 24) | (c[0] << 16) | (c[1] << 8) | c[2]).toString(16).slice(1); }
@@ -123,9 +122,8 @@
     const k = n >= 0 ? n : (id | 0);
     return ((k % TINT_VARIANTS) + TINT_VARIANTS) % TINT_VARIANTS;
   }
-  // Texture offset: stone follows its tint step; rubble varies by id (siblings of one block differ)
-  function texVariant(look, cracked, n, id) {
-    if (cracked) return ((id | 0) % TEX_VARIANTS + TEX_VARIANTS) % TEX_VARIANTS;
+  // Texture offset: stone follows its tint step
+  function texVariant(look, n, id) {
     if (look === 'normal') return tintVariant(look, n, id);
     const k = n >= 0 ? n : (id | 0);
     return ((k % TEX_VARIANTS) + TEX_VARIANTS) % TEX_VARIANTS;
@@ -133,8 +131,8 @@
 
   const palettes = new Map();
   const SPENT = [120, 130, 150];   // a used crystal fades toward slate
-  function palette(look, tint, cracked, tv, spent) {
-    const key = look + '|' + (tint || '') + '|' + (tv || 0) + (cracked ? '|c' : '') + (spent ? '|s' : '');
+  function palette(look, tint, tv, spent) {
+    const key = look + '|' + (tint || '') + '|' + (tv || 0) + (spent ? '|s' : '');
     let p = palettes.get(key);
     if (p) return p;
     const type = TT.BLOCK_TYPES[look];
@@ -146,10 +144,6 @@
     } else {
       base = rgbOf(type.colors.base); light = rgbOf(type.colors.light);
       dark = rgbOf(type.colors.dark); accent = rgbOf(type.colors.accent);
-    }
-    if (cracked && !(ART[look] && ART[look].broken)) {
-      const k = (c, t) => mix(mix(c, grey(c), 0.3), BLACK, t);
-      base = k(base, 0.24); light = k(light, 0.3); dark = k(dark, 0.2); accent = k(accent, 0.2);
     }
     p = { base, light, dark, accent, edge: mix(dark, BLACK, 0.45) };
     palettes.set(key, p);
@@ -567,28 +561,6 @@
     specks(g, T, rng, 150, u * 0.3, u * 0.8, ['rgba(255,200,230,0.28)', 'rgba(180,140,255,0.22)', rgba(p.accent, 0.3)]);
   }
 
-  // Pebble: clay grain and small pits
-  function tileClay(g, T, N, u, p, rng) {
-    g.fillStyle = css(p.base);
-    g.fillRect(0, 0, T, T);
-    blobs(g, T, rng, 12, N * 0.3, N * 0.7, [p.light.concat(0.14), p.dark.concat(0.14)]);
-    specks(g, T, rng, 280, u * 0.4, u * 0.9, [rgba(p.light, 0.24), rgba(p.dark, 0.24), rgba(p.dark, 0.12)]);
-    specks(g, T, rng, 30, u * 0.9, u * 1.5, [rgba(p.dark, 0.18)]);
-  }
-
-  // Crumble: sandstone, wavy strata, sand grain and a few deep cracks
-  function tileSand(g, T, N, u, p, rng) {
-    g.fillStyle = css(mix(p.base, p.light, 0.14));
-    g.fillRect(0, 0, T, T);
-    strata(g, T, N, rng, 8, Math.max(1, u * 1.4), [rgba(p.dark, 0.14), rgba(p.dark, 0.09), rgba(p.light, 0.2)]);
-    specks(g, T, rng, 340, u * 0.3, u * 0.7, [rgba(p.light, 0.45), rgba(p.dark, 0.3)]);
-    const cracks = [];
-    for (let i = 0; i < 4; i++) cracks.push(walk(rng, rng() * T, rng() * T, rng() * TAU, 4, N * 0.16, 1.2));
-    const w = Math.max(1, u * 1.1);
-    strokeLines(g, T, cracks, w, rgba(p.light, 0.35), w * 0.8, w * 0.8);
-    strokeLines(g, T, cracks, w, rgba(p.accent, 0.5));
-  }
-
   const tiles = new Map();
   let tileBytes = 0;
   function textureTile(N, look, spent) {
@@ -608,7 +580,7 @@
     }
     const T = TILE_CELLS * N;
     t = makeCanvas(T, T);
-    art.tile(t.getContext('2d'), T, N, N / 32, palette(look, null, false, 0, spent), TT.RNG.mulberry32(TT.RNG.hashString(name) + (spent ? 31 : 0)));
+    art.tile(t.getContext('2d'), T, N, N / 32, palette(look, null, 0, spent), TT.RNG.mulberry32(TT.RNG.hashString(name) + (spent ? 31 : 0)));
     tiles.set(key, t);
     tileBytes += T * T * 4;
     return t;
@@ -673,59 +645,6 @@
       dot(g, N * 0.4, N * 0.44, Math.max(0.8, u * 1.4));
     }
   }
-
-  function iconPebble(g, N, u, p) {
-    const cx = N / 2, cy = N * 0.54, rx = N * 0.25, ry = N * 0.19;
-    g.fillStyle = rgba(p.dark, 0.6);
-    g.beginPath(); g.ellipse(cx + u * 0.8, cy + ry * 0.45, rx, ry * 0.85, 0, 0, TAU); g.fill();
-    const grd = g.createRadialGradient(cx - rx * 0.35, cy - ry * 0.55, 1, cx, cy, rx * 1.05);
-    grd.addColorStop(0, css(p.accent));
-    grd.addColorStop(0.55, css(p.light));
-    grd.addColorStop(1, css(mix(p.base, p.dark, 0.15)));
-    g.fillStyle = grd;
-    g.beginPath(); g.ellipse(cx, cy, rx, ry, 0, 0, TAU); g.fill();
-    g.strokeStyle = rgba(p.dark, 0.7);
-    g.lineWidth = Math.max(1, u * 0.8);
-    g.stroke();
-  }
-
-  // Jagged crack lines from a centre point to the edges; light pass offset for a chiselled look
-  function crackLines(g, N, u, p, rng, color, count) {
-    const cx = N * (0.38 + rng() * 0.24), cy = N * (0.38 + rng() * 0.24);
-    const lines = [];
-    for (let k = 0; k < count; k++) {
-      const a = k * TAU / count + rng() * 1.1;
-      const pts = [cx, cy];
-      let r = 0;
-      while (r < N * 0.75) {
-        r += N * (0.14 + rng() * 0.12);
-        const j = (rng() - 0.5) * 0.7;
-        pts.push(cx + Math.cos(a + j) * r, cy + Math.sin(a + j) * r);
-      }
-      lines.push(pts);
-    }
-    g.lineCap = 'round';
-    g.lineJoin = 'round';
-    const w = Math.max(1, u * 1.3);
-    for (let pass = 0; pass < 2; pass++) {
-      g.strokeStyle = pass ? color : rgba(p.light, 0.35);
-      g.lineWidth = w;
-      const off = pass ? 0 : Math.max(1, u * 0.8);
-      g.beginPath();
-      for (const pts of lines) {
-        g.moveTo(pts[0] + off, pts[1] + off);
-        for (let i = 2; i < pts.length; i += 2) g.lineTo(pts[i] + off, pts[i + 1] + off);
-      }
-      g.stroke();
-    }
-  }
-  function iconCrumble(g, N, u, p, rng) {
-    crackLines(g, N, u, p, rng, css(p.accent), 3);
-    g.fillStyle = rgba(p.accent, 0.55);
-    const s = N * 0.2;
-    quad(g, N, N, N - s, N, N - s * 0.4, N - s * 0.5, N, N - s);
-  }
-  function iconRubble(g, N, u, p, rng) { crackLines(g, N, u, p, rng, rgba(mix(p.dark, BLACK, 0.5), 0.9), 3); }
 
   function dropPath(g, cx, cy, s) {
     g.beginPath();
@@ -974,55 +893,6 @@
     g.lineTo(bx + (fromRight ? -0.4 : 0.6) * N * 0.14, by + (fromRight ? 0.6 : -0.4) * N * 0.14);
     g.stroke();
   }
-  function glints(g, N) {
-    g.fillStyle = 'rgba(255,255,255,0.3)';
-    quad(g, N * 0.12, N * 0.4, N * 0.4, N * 0.12, N * 0.6, N * 0.12, N * 0.12, N * 0.6);
-    g.fillStyle = 'rgba(255,255,255,0.6)';
-    quad(g, N * 0.12, N * 0.68, N * 0.68, N * 0.12, N * 0.75, N * 0.12, N * 0.12, N * 0.75);
-  }
-  // Glass rubble: shard cracks radiating from an impact point (the shard is one cell)
-  function rubbleGlass(g, N, u, p, rng) {
-    glints(g, N);
-    const cx = N * (0.3 + rng() * 0.4), cy = N * (0.3 + rng() * 0.4);
-    const lines = [];
-    const n = 5 + Math.floor(rng() * 2);
-    for (let k = 0; k < n; k++) {
-      const a = k * TAU / n + rng() * 0.7;
-      const pts = [cx, cy];
-      let r = 0;
-      while (r < N * 0.8) {
-        r += N * (0.12 + rng() * 0.14);
-        const j = (rng() - 0.5) * 0.5;
-        pts.push(cx + Math.cos(a + j) * r, cy + Math.sin(a + j) * r);
-      }
-      lines.push(pts);
-    }
-    g.lineCap = 'round';
-    g.lineJoin = 'round';
-    for (let pass = 0; pass < 2; pass++) {
-      g.strokeStyle = pass ? 'rgba(255,240,244,0.9)' : rgba(p.dark, 0.55);
-      g.lineWidth = Math.max(1, u * (pass ? 0.8 : 1.6));
-      g.beginPath();
-      for (const pts of lines) {
-        g.moveTo(pts[0], pts[1]);
-        for (let i = 2; i < pts.length; i += 2) g.lineTo(pts[i], pts[i + 1]);
-      }
-      g.stroke();
-    }
-    // a ring of tiny fractures round the impact point
-    g.strokeStyle = 'rgba(255,240,244,0.55)';
-    g.lineWidth = Math.max(1, u * 0.6);
-    g.beginPath(); g.arc(cx, cy, N * 0.1, 0, TAU); g.stroke();
-  }
-  // Chip a corner off a glass shard (after the outline, so the edge does not cover the gap)
-  function chipGlass(g, N, u, rng) {
-    const k = Math.floor(rng() * 4), s = N * (0.2 + rng() * 0.12);
-    const x0 = k & 1 ? N : 0, y0 = k & 2 ? N : 0, sx = k & 1 ? -1 : 1, sy = k & 2 ? -1 : 1;
-    g.globalCompositeOperation = 'destination-out';
-    g.fillStyle = '#000000';
-    tri(g, x0, y0, x0 + sx * s, y0, x0, y0 + sy * s * (0.6 + rng() * 0.4));
-    g.globalCompositeOperation = 'source-over';
-  }
 
   // A pyramid stud seen head-on: a spike pointing out of the face, red at the point
   function iconStud(g, N, u, p) {
@@ -1237,7 +1107,6 @@
   const LIGHT = { hi: 0.42, sh: 0.32, top: 0.1, bottom: 0.12, seam: 0.2 };
   const ART = {
     normal: { tile: tileStone, tileKey: 'stone', base: true },
-    rubble: { tile: tileStone, tileKey: 'stone', base: true },
     steel: { tile: tileSteel, piece: pieceSteel, light: { hi: 0.6, sh: 0.32, top: 0.04, bottom: 0.1, seam: 0.15 } },
     vine: { tile: tileVine, icon: iconLeaf },
     frost: {
@@ -1248,8 +1117,6 @@
       tile: tileGem, icon: iconHeart, piece: pieceGem, edge: (p) => css(mix(p.dark, BLACK, 0.35)),
       light: { hi: 0.5, sh: 0.4, top: 0.06, bottom: 0.1, seam: 0 }
     },
-    pebble: { tile: tileClay, icon: iconPebble },
-    crumble: { tile: tileSand, icon: iconCrumble },
     oil: {
       tile: tileOil, icon: iconDrop, piece: pieceOil, rim: (p) => rgba(mix(p.light, WHITE, 0.25), 0.6),
       light: { hi: 0.55, sh: 0.5, top: 0.06, bottom: 0.12, seam: 0.12 }
@@ -1268,7 +1135,6 @@
     rubber: { tile: tileRubber, icon: iconBounce, light: { hi: 0.42, sh: 0.34, soft: 0.22, top: 0.08, bottom: 0.12, seam: 0.16 } },
     glass: {
       tile: tileGlass, icon: iconGlass, piece: pieceGlass, edge: (p) => rgba(mix(p.dark, BLACK, 0.3), 0.92),
-      broken: rubbleGlass, chip: chipGlass,
       light: { hi: 0.85, sh: 0.5, hiC: [255, 228, 235], shC: [255, 170, 190], soft: 0, top: 0, bottom: 0, seam: 0.1 }
     },
     spikes: { tile: tileSpikes, icon: iconStud, rim: (p) => rgba(mix(p.light, WHITE, 0.2), 0.4) }
@@ -1317,15 +1183,15 @@
     return (look === 'crystal' && (flags & 1)) || (look === 'magma' && (flags & 2)) || (look === 'glass' && (flags & 4)) ? 1 : 0;
   }
 
-  function paintPiece(N, shape, look, tint, cracked, tv, xv, overlay, flags) {
+  function paintPiece(N, shape, look, tint, tv, xv, overlay, flags) {
     const art = ART[look] || ART.normal;
-    const spent = look === 'crystal' && !cracked && (flags & 1) !== 0;
-    const p = palette(look, tint, cracked, tv, spent);
+    const spent = look === 'crystal' && (flags & 1) !== 0;
+    const p = palette(look, tint, tv, spent);
     const geom = shapeGeom(shape), u = N / 32, s = outlineWidth(N);
-    const top = look === 'spikes' && !cracked ? Math.round(N * SPIKE_H) : 0;
+    const top = look === 'spikes' ? Math.round(N * SPIKE_H) : 0;
     const W = shape.w * N, H = shape.h * N, Y0 = top + H;
     const c = makeCanvas(W, Y0), g = c.getContext('2d');
-    const rng = TT.RNG.mulberry32(TT.RNG.hashString(look + shape.id) + xv * 7919 + (cracked ? 104729 : 0));
+    const rng = TT.RNG.mulberry32(TT.RNG.hashString(look + shape.id) + xv * 7919);
     const lt = art.light || LIGHT;
     const q = { g, N, u, s, p, rng, geom, shape, W, H, top, Y0 };
     g.save();
@@ -1338,17 +1204,6 @@
     const ox = Math.floor((((xv + 1) * 0.618034 + (hs % 997) / 997) % 1) * T);
     const oy = Math.floor((((xv + 1) * 0.381966 + (hs % 991) / 991) % 1) * T);
     for (let y = top - oy; y < Y0; y += T) for (let x = -ox; x < W; x += T) g.drawImage(tile, x, y);
-    if (cracked && !art.base && !art.broken) {
-      // rubble keeps the look it came from, darker and greyer
-      g.globalCompositeOperation = 'saturation';
-      g.globalAlpha = 0.3;
-      g.fillStyle = '#808080';
-      g.fillRect(0, top, W, H);
-      g.globalAlpha = 1;
-      g.globalCompositeOperation = 'source-over';
-      g.fillStyle = 'rgba(0,0,0,0.24)';
-      g.fillRect(0, top, W, H);
-    }
     if (art.piece) art.piece(q);
     // one soft light over the whole piece: brighter top, darker foot
     const lg = g.createLinearGradient(0, top, 0, Y0);
@@ -1358,11 +1213,10 @@
     g.fillStyle = lg;
     g.fillRect(0, top, W, H);
     if (lt.seam) drawSeams(q, lt.seam);
-    // the type icon once, on the cell nearest the centre of mass (rubble: its cracks)
+    // the type icon once, on the cell nearest the centre of mass
     const cc = shape.cells[geom.centre];
     g.translate(cc[0] * N, Y0 - (cc[1] + 1) * N);
-    if (cracked) (art.broken || iconRubble)(g, N, u, p, rng);
-    else if (art.icon) art.icon(g, N, u, p, rng, iconFlag(look, flags));
+    if (art.icon) art.icon(g, N, u, p, rng, iconFlag(look, flags));
     g.setTransform(1, 0, 0, 1, 0, 0);
     bevel(q, lt);
     if (overlay === 1) frostOverlay(q);
@@ -1371,7 +1225,6 @@
     strokeInside(q, art.edge ? art.edge(p) : css(p.edge), s);
     if (overlay === 2) petrifyOverlay(q);
     g.restore();
-    if (cracked && art.chip) art.chip(g, N, u, rng);
     if (top) drawSpikeStrips(g, shape.cells, geom.open, N, 0, Y0, spikeStrip(N, (flags & 8) !== 0));
     return c;
   }
@@ -1409,12 +1262,12 @@
     e.canvas = null;
   }
   // peek: only look it up (null if it would have to be painted)
-  function pieceSprite(N, shape, look, tint, cracked, tv, xv, overlay, flags, peek) {
-    const key = N + '|' + shape.id + '|' + look + '|' + (tint || '') + '|' + tv + '|' + xv + '|' + (cracked ? 1 : 0) + '|' + overlay + '|' + flags;
+  function pieceSprite(N, shape, look, tint, tv, xv, overlay, flags, peek) {
+    const key = N + '|' + shape.id + '|' + look + '|' + (tint || '') + '|' + tv + '|' + xv + '|' + overlay + '|' + flags;
     let e = sprites.get(key);
     if (!e) {
       if (peek) return null;
-      const c = paintPiece(N, shape, look, tint, cracked, tv, xv, overlay, flags);
+      const c = paintPiece(N, shape, look, tint, tv, xv, overlay, flags);
       e = { key, N, canvas: c, dx: 0, dy: -c.height, bytes: c.width * c.height * 4, used: spriteClock };
       sprites.set(key, e);
       spriteBytes += e.bytes;
@@ -1567,10 +1420,9 @@
   // colour with a light rim just outside the outline
   function buildPieceSprite(N, typeKey, shape, v) {
     const type = TT.BLOCK_TYPES[typeKey] || TT.BLOCK_TYPES.normal;
-    const cracked = type.key === 'rubble';
-    const look = cracked || !ART[type.key] ? 'normal' : type.key;
+    const look = ART[type.key] ? type.key : 'normal';
     const tint = look === 'normal' ? TT.NORMAL_TINTS[shape.family] : null;
-    const spr = pieceSprite(N, shape, look, tint, cracked, tintVariant(look, v, 0), texVariant(look, cracked, v, 0), 0, 0).canvas;
+    const spr = pieceSprite(N, shape, look, tint, tintVariant(look, v, 0), texVariant(look, v, 0), 0, 0).canvas;
     const pad = Math.max(3, Math.round(N * 0.42)), geom = shapeGeom(shape);
     const c = makeCanvas(spr.width + pad * 2, spr.height + pad * 2), g = c.getContext('2d');
     const oy = pad + spr.height;   // canvas y of the piece's local origin (its bottom edge)
@@ -1593,7 +1445,20 @@
     g.fill();
     g.globalCompositeOperation = 'source-over';
     g.drawImage(spr, pad, pad);
-    return { canvas: c, pad, oy, typeKey, shape, v, gen: -1 };
+    return { canvas: c, pad, oy, typeKey, shape, v, gen: -1, grey: null };
+  }
+
+  // A fully desaturated copy (same alpha): the hovering piece while letting go would cancel
+  function greyCopy(src) {
+    const c = makeCanvas(src.width, src.height), g = c.getContext('2d');
+    g.drawImage(src, 0, 0);
+    g.globalCompositeOperation = 'saturation';
+    g.fillStyle = '#808080';
+    g.fillRect(0, 0, c.width, c.height);
+    g.globalCompositeOperation = 'destination-in';
+    g.drawImage(src, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    return c;
   }
 
   const ghostColorCache = new Map();
@@ -1601,7 +1466,7 @@
     const key = typeKey === 'normal' ? 'normal' + shape.family : typeKey;
     let gc = ghostColorCache.get(key);
     if (!gc) {
-      const p = typeKey === 'normal' ? palette('normal', TT.NORMAL_TINTS[shape.family], false) : palette(typeKey, null, false);
+      const p = typeKey === 'normal' ? palette('normal', TT.NORMAL_TINTS[shape.family]) : palette(typeKey, null);
       gc = { fill: rgba(p.base, 0.15), stroke: rgba(mix(p.light, WHITE, 0.35), 0.78) };
       ghostColorCache.set(key, gc);
     }
@@ -1688,6 +1553,8 @@
     return c;
   }
 
+  // The platform and its pillar, `cells` wide (any width, e.g. 6.2): bricks and slab joints
+  // are spread evenly over it, so no course ends in a sliver
   function platformSprite(N, cells, depth) {
     const W = Math.round(cells * N), H = Math.round(depth * N);
     const c = makeCanvas(W, H), g = c.getContext('2d');
@@ -1699,15 +1566,16 @@
     pg.addColorStop(1, '#2c313f');
     g.fillStyle = pg;
     g.fillRect(0, slab, W, H - slab);
-    // masonry courses
+    // masonry courses: whole bricks of about 1.5 cells, every other course offset by half a brick
     const course = Math.round(N * 0.75), lw = Math.max(1, Math.round(u));
+    const brick = W / Math.max(2, Math.round(cells / 1.5));
     for (let row = 0, y = slab; y < H; row++, y += course) {
       g.fillStyle = 'rgba(14,16,24,0.55)';
       g.fillRect(0, y + course - lw, W, lw);
       g.fillStyle = 'rgba(160,172,200,0.08)';
       g.fillRect(0, y + course, W, lw);
       g.fillStyle = 'rgba(14,16,24,0.5)';
-      for (let x = (row % 2 ? N * 0.75 : 0) + N * 1.5; x < W; x += N * 1.5) g.fillRect(Math.round(x), y, lw, course);
+      for (let x = brick * (row % 2 ? 0.5 : 1); x < W - brick * 0.25; x += brick) g.fillRect(Math.round(x), y, lw, course);
     }
     g.fillStyle = 'rgba(255,255,255,0.06)';
     g.fillRect(0, slab, Math.max(1, Math.round(u * 2)), H - slab);
@@ -1726,7 +1594,8 @@
       dot(g, rng() * W, slab * (0.25 + rng() * 0.65), Math.max(0.6, u * (0.4 + rng() * 0.7)));
     }
     g.fillStyle = 'rgba(16,18,26,0.45)';
-    for (let x = N * 2; x < W - 1; x += N * 2) g.fillRect(Math.round(x), Math.round(slab * 0.2), lw, slab);
+    const seg = W / Math.max(1, Math.round(cells / 2));   // slab stones of about 2 cells
+    for (let x = seg; x < W - seg * 0.25; x += seg) g.fillRect(Math.round(x), Math.round(slab * 0.2), lw, slab);
     g.fillStyle = 'rgba(214,222,238,0.9)';
     g.fillRect(0, 0, W, Math.max(1, Math.round(u * 1.4)));
     g.fillStyle = 'rgba(8,10,16,0.7)';
@@ -1785,16 +1654,27 @@
       this._labels = [];
       this._ms = { m: NaN, full: null, text: '', w: 0, px: 0 };
       this._tmp = { x: 0, y: 0 };
+      this.dragCue = { active: false, cancel: false };   // see setDragCue
       this.view = { ox: 0, oy: 0, ppu: 1, dpr: 1, w: 1, h: 1, left: 0, right: 0, bottom: 0, top: 0 };
       this.stats = { drawn: 0, cells: 0, statics: 0, movers: 0, sprites: 0, spriteBytes: 0 };
     }
 
     setOptions(o) { if (o) Object.assign(this.options, o); }
 
+    // The block in hand (ui.js mirrors TT.Input's cue): { active: a drag is on, cancel: letting go
+    // now would cancel it }. While cancel is set the hovering piece is drawn greyed out and crossed,
+    // without its ghost. Cleared by setGame and by any falsy / inactive cue.
+    setDragCue(cue) {
+      const d = this.dragCue;
+      d.active = !!(cue && cue.active);
+      d.cancel = d.active && !!cue.cancel;
+    }
+
     setGame(game) {
       for (const off of this._unsubs) { try { off(); } catch (err) { /* ignore */ } }
       this._unsubs.length = 0;
       this.game = game || null;
+      this.setDragCue(null);
       this.particles.clear();
       for (const r of this._vanish) { r.active = false; r.block = null; }
       this._vanishCount = 0;
@@ -2176,10 +2056,9 @@
         this._info.set(b, info);
       }
       const look = ART[b.look] ? b.look : ART[key] ? key : 'normal';
-      const cracked = !!b.cracked || key === 'rubble';
       const standIn = info.sprite && info.sprite.canvas ? info.sprite : null;
-      const s = pieceSprite(this.N, b.shape, look, b.tint, cracked, tintVariant(look, b.n, b.id),
-        texVariant(look, cracked, b.n, b.id), overlay, !cracked && look === key ? flags : 0,
+      const s = pieceSprite(this.N, b.shape, look, b.tint, tintVariant(look, b.n, b.id),
+        texVariant(look, b.n, b.id), overlay, look === key ? flags : 0,
         standIn !== null && performance.now() > this._paintUntil);
       if (!s) {
         this._lagging++;
@@ -2441,7 +2320,7 @@
       ctx.globalAlpha = 1;
     }
 
-    // ---- Vanishing blocks (swallowed / melted / lost keep fading for a moment) -----------
+    // ---- Vanishing blocks (swallowed / melted / lost / popped / smashed keep fading a moment) ---
     _addVanish(b, kind, tx, ty) {
       if (!b || !b.body || !b.cells || !b.shape) return;
       let rec = null;
@@ -2456,7 +2335,7 @@
       rec.active = true;
       rec.kind = kind;
       rec.t = 0;
-      rec.dur = kind === 'swallow' ? 0.5 : kind === 'melt' ? 0.75 : kind === 'pop' ? 0.14 : 0.4;
+      rec.dur = kind === 'swallow' ? 0.5 : kind === 'melt' ? 0.75 : kind === 'pop' ? 0.14 : kind === 'shatter' ? 0.16 : 0.4;
       rec.cx = rec.sx = p.x + c * com.x - s * com.y;
       rec.cy = rec.sy = p.y + s * com.x + c * com.y;
       rec.tx = tx != null ? tx : rec.cx;
@@ -2499,6 +2378,8 @@
           y -= 0.45 * k; sc = 1 - 0.18 * k;
         } else if (r.kind === 'pop') {
           sc = 1 + 0.35 * k; alpha = (1 - k) * (1 - k);
+        } else if (r.kind === 'shatter') {
+          sc = 1 - 0.3 * k; alpha = (1 - k) * (1 - k);
         }
         const c = Math.cos(a) * sc, s = Math.sin(a) * sc;
         ctx.setTransform(c, -s, s, c, v.ox + x * N, v.oy - y * N);
@@ -2542,14 +2423,40 @@
       const px = +piece.x || 0;
       const py = Number.isFinite(game.hoverY) ? game.hoverY : (+piece.y || 0);
       const o = this.options;
-      if (game.ghost && o.showGhost !== false && o.ghost !== false && o.ghostPreview !== false) {
+      // the block in hand is outside the playfield: letting go drops nothing, so no landing either
+      const cancel = this.dragCue.cancel && game.state === 'playing';
+      if (!cancel && game.ghost && o.showGhost !== false && o.ghost !== false && o.ghostPreview !== false) {
         this._drawGhost(ctx, v, game.ghost, shape, typeKey, px, py);
       }
       const ps = this._pieceSprite(typeKey, shape, spec.n);
+      const X = Math.round(v.ox + px * N), Y = Math.round(v.oy - py * N);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (cancel) {
+        ctx.globalAlpha = 0.35;
+        ctx.drawImage(ps.grey || (ps.grey = greyCopy(ps.canvas)), X - ps.pad, Y - ps.oy);
+        ctx.globalAlpha = 1;
+        this._drawCancelMark(ctx, X + shape.w * N / 2, Y - shape.h * N / 2, N);
+        return;
+      }
       ctx.globalAlpha = game.canDrop === false ? 0.38 + 0.3 * clamp(+game.readyProgress || 0, 0, 1) : 1;
-      ctx.drawImage(ps.canvas, Math.round(v.ox + px * N) - ps.pad, Math.round(v.oy - py * N) - ps.oy);
+      ctx.drawImage(ps.canvas, X - ps.pad, Y - ps.oy);
       ctx.globalAlpha = 1;
+    }
+
+    // Bold red cross over the inactive piece (drawn on top of it, fully opaque)
+    _drawCancelMark(ctx, x, y, N) {
+      const r = N * 0.62;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r);
+      ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r);
+      ctx.strokeStyle = 'rgba(36,4,8,0.85)';
+      ctx.lineWidth = Math.max(5, N * 0.42);
+      ctx.stroke();
+      ctx.strokeStyle = '#ff4a3d';
+      ctx.lineWidth = Math.max(3, N * 0.24);
+      ctx.stroke();
+      ctx.lineCap = 'butt';
     }
 
     _drawGhost(ctx, v, g, shape, typeKey, px, py) {
@@ -2877,30 +2784,23 @@
       this.shake(7 + R * 2);
     }
 
+    // An anvil smashed a block, or ruby glass broke under one: e.block (emitted before it is removed)
+    // bursts into shards in its own colours (glass: glinting slivers) and is gone in a blink
     _onShatter(e) {
-      let look = e.look || (e.block && e.block.look) || (e.cause === 'glass' ? 'glass' : null);
-      let tint = e.tint || (e.block && e.block.tint) || null;
-      const P = this.game && this.game.physics;
-      if (!look && P && Number.isFinite(e.x)) {
-        let best = null, bd = Infinity;
-        for (const b of P.blocksInRadius(e.x, e.y, 2.2)) {
-          if (b.typeKey !== 'rubble') continue;
-          const p = b.body.getPosition(), d = (p.x - e.x) * (p.x - e.x) + (p.y - e.y) * (p.y - e.y);
-          if (d < bd) { bd = d; best = b; }
-        }
-        if (best) { look = best.look; tint = best.tint; }
-      }
-      if (!look) look = e.cause === 'crumble' ? 'crumble' : 'normal';
+      const b = e && e.block, bb = this._blockBox(b);
+      let x = e.x, y = e.y, w = 1.6, h = 1;
+      if (bb) { x = (bb.minX + bb.maxX) / 2; y = (bb.minY + bb.maxY) / 2; w = bb.maxX - bb.minX; h = bb.maxY - bb.minY; }
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      const look = b ? (ART[b.look] ? b.look : ART[b.typeKey] ? b.typeKey : 'normal') : e.cause === 'glass' ? 'glass' : 'normal';
+      const cells = b && b.cells ? b.cells.length : 4;
       if (look === 'glass') {
-        // translucent slivers that glint, no stone dust
-        this.particles.burst('glass', e.x, e.y, { count: clamp((+e.count || 4) * 5, 12, 32), w: 1.6, h: 1 });
-        if (e.cause === 'anvil') this.shake(5);
-        return;
+        this.particles.burst('glass', x, y, { count: clamp(cells * 5, 12, 32), w, h });
+      } else {
+        const pal = palette(look, b ? b.tint : null, b ? tintVariant(look, b.n, b.id) : 0);
+        this.particles.burst('shards', x, y, { count: clamp(cells * 4, 8, 30), w, h, colors: [hex(pal.base), hex(pal.light), hex(pal.dark)] });
+        this.particles.burst('dust', x, bb ? bb.minY : y - 0.4, { impact: 6, w, count: 8 });
       }
-      const pal = palette(ART[look] ? look : 'normal', tint, false);
-      const n = clamp((+e.count || 4) * 3, 6, 30);
-      this.particles.burst('shards', e.x, e.y, { count: n, w: 1.6, h: 1, colors: [hex(pal.base), hex(pal.light), hex(pal.dark)] });
-      this.particles.burst('dust', e.x, e.y - 0.4, { impact: 6, w: 1.6, count: 6 });
+      if (b && !b.dead) this._addVanish(b, 'shatter');
       if (e.cause === 'anvil') this.shake(5);
     }
 
@@ -2912,7 +2812,7 @@
       const hole = e.hole && e.hole.body ? e.hole.body.getWorldCenter() : null;
       if (hole && Number.isFinite(x)) { x += (hole.x - x) * 0.35; y += (hole.y - y) * 0.35; }
       if (!Number.isFinite(x)) return;
-      const pal = b ? palette(ART[b.look] ? b.look : 'normal', b.tint, !!b.cracked) : null;
+      const pal = b ? palette(ART[b.look] ? b.look : 'normal', b.tint) : null;
       this.particles.burst('swirl', x, y, { radius: 1.5, count: 26, colors: pal ? [hex(pal.base), hex(pal.light), '#ff3d2e', '#5a0b14'] : undefined });
       if (b) this._addVanish(b, 'swallow', x, y);
     }
@@ -3038,7 +2938,7 @@
       let x = e.x, y = e.y, w = 1, h = 1;
       if (bb) { x = (bb.minX + bb.maxX) / 2; y = (bb.minY + bb.maxY) / 2; w = bb.maxX - bb.minX; h = bb.maxY - bb.minY; }
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-      const pal = b ? palette(ART[b.look] ? b.look : 'normal', b.tint, !!b.cracked) : null;
+      const pal = b ? palette(ART[b.look] ? b.look : 'normal', b.tint) : null;
       const colors = pal ? [hex(pal.base), hex(pal.light), hex(pal.dark)] : undefined;
       this.particles.burst('pop', x, y, { w, h, colors, count: clamp(8 + (b && b.cells ? b.cells.length : 1) * 3, 10, 22) });
       if (b && !b.dead) this._addVanish(b, 'pop');
@@ -3074,11 +2974,10 @@
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
     g.clearRect(0, 0, W, H);
-    const cracked = type.key === 'rubble';
-    const look = cracked || !ART[type.key] ? 'normal' : type.key;
+    const look = ART[type.key] ? type.key : 'normal';
     const tint = look === 'normal' ? TT.NORMAL_TINTS[shape.family] : null;
     const n = spec.n >= 0 ? spec.n : 0;   // a dealt block previews exactly as it will look
-    const spr = pieceSprite(cell, shape, look, tint, cracked, tintVariant(look, n, 0), texVariant(look, cracked, n, 0), 0, look === 'spikes' ? 8 : 0);
+    const spr = pieceSprite(cell, shape, look, tint, tintVariant(look, n, 0), texVariant(look, n, 0), 0, look === 'spikes' ? 8 : 0);
     const x0 = Math.round((W - shape.w * cell) / 2), y0 = Math.round((H - (shape.h - rise) * cell) / 2);
     g.drawImage(spr.canvas, x0, y0 + shape.h * cell - spr.canvas.height);
     spr.used = 0;   // the pixels are copied: first to go when the cache is full

@@ -1,9 +1,16 @@
 /* DOM-light parts of js/ui.js (and TT.App from js/main.js) in Node: slot buttons leave pointer
- * presses to TT.Input (no Drop button any more), the drag cues mirror TT.Input's state, both "Same
- * seed" boxes share one setting, Restart / Play again use a new random seed unless "Same seed" is
- * ticked (persisted as restartSameSeed, false for older saves), the installed app locks portrait,
- * the pending-run snapshot (a run the OS kills still gets its record, without spoiling the
- * game-over badge), toasts, and the Back guard's history state machine. */
+ * presses to TT.Input (no Drop button any more), the drag cues mirror TT.Input's state (the red
+ * cancel target, the renderer's greyed-out piece, one buzz per entry into the cancel zone,
+ * "Cancelled" plus the cancel sound when a drag is let go there, everything reset when the drag
+ * ends or is interrupted), both "Same seed" boxes share one setting, Restart / Play again use a new
+ * random seed unless "Same seed" is ticked (persisted as restartSameSeed, false for older saves),
+ * saved block sets that list removed types (pebble, crumble) still load, the installed app locks
+ * portrait, the pending-run snapshot (a run the OS kills still gets its record, without spoiling
+ * the game-over badge), toasts, and the Back guard's history state machine. The "?" badge shows on
+ * the special blocks of the tray only; pressing it opens that block's card without selecting,
+ * moving or dropping anything; the card and the special-block explorer ("?" button, ? / H) list
+ * what each block does with its current odds, pause the game and resume it when they close (a game
+ * that was already paused stays paused). */
 'use strict';
 const assert = require('assert');
 const path = require('path');
@@ -27,15 +34,18 @@ function loadUI() {
   return TT.UI;
 }
 
-// Just enough DOM: class lists, text, style, children
+// Just enough DOM: class lists, text, attributes, style, children
 function el(tag) {
   const cls = new Set();
   const n = {
     tagName: String(tag || 'div').toUpperCase(), children: [], parent: null, dataset: {}, hidden: false,
     clientWidth: 0, clientHeight: 0, offsetWidth: 0, offsetHeight: 0, style: { setProperty() {} }, writes: 0,
-    _text: '',
-    get textContent() { return n._text; },
-    set textContent(v) { n._text = String(v); n.writes++; },
+    _text: '', attrs: {},
+    get textContent() { return n._text + n.children.map((c) => (typeof c === 'string' ? c : c.textContent)).join(''); },
+    set textContent(v) {
+      for (const c of n.children) if (typeof c !== 'string') c.parent = null;
+      n._text = String(v); n.children = []; n.writes++;
+    },
     set className(v) { cls.clear(); for (const c of String(v).split(/\s+/)) if (c) cls.add(c); },
     get className() { return Array.from(cls).join(' '); },
     classList: {
@@ -43,10 +53,23 @@ function el(tag) {
       contains: (c) => cls.has(c),
       toggle: (c, on) => { if (on === undefined ? !cls.has(c) : on) cls.add(c); else cls.delete(c); }
     },
+    setAttribute(k, v) { n.attrs[k] = String(v); },
+    getAttribute(k) { return k in n.attrs ? n.attrs[k] : null; },
     appendChild(c) { c.parent = n; n.children.push(c); return c; },
+    append(...cs) { for (const c of cs) { if (typeof c === 'string') n.children.push(c); else n.appendChild(c); } },
     remove() { if (n.parent) { n.parent.children.splice(n.parent.children.indexOf(n), 1); n.parent = null; } }
   };
   return n;
+}
+// Every element below n (depth first) that passes test
+function findAll(n, test, out) {
+  const list = out || [];
+  for (const c of n.children) {
+    if (typeof c === 'string') continue;
+    if (test(c)) list.push(c);
+    findAll(c, test, list);
+  }
+  return list;
 }
 
 // --- Slot buttons: pointer presses belong to TT.Input; there is no Drop button any more -------------
@@ -76,7 +99,7 @@ function el(tag) {
   assert.strictEqual(resume.blurs, 0, 'keyboard focus stays where the player put it');
 }
 
-// --- Drag cues: lifted slot, "Release to cancel" over the tray, "Dropping when ready" by the piece -----
+// --- Drag cues: lifted slot, the red cancel target, "Cancelled", "Dropping when ready" by the piece -----
 {
   const { UI } = loadUI();
   const ui = Object.create(UI.prototype);
@@ -90,31 +113,80 @@ function el(tag) {
   ui.hud = {};
   ui._stageW = 400;
   ui._pt = { x: 0, y: 0 };
-  const cue = { slot: -1, zone: '', queued: false };
+  const cue = { slot: -1, zone: '', queued: false, cancels: 0 };
+  const rcues = [], buzzes = [], sounds = [];
   // 25 px per cell, world y 24 at the top of the playfield
-  ui.app = { input: { cue }, renderer: { scale: 25, worldToScreen: (x, y, o) => { o.x = x * 25; o.y = (24 - y) * 25; return o; } } };
+  const renderer = {
+    scale: 25, worldToScreen: (x, y, o) => { o.x = x * 25; o.y = (24 - y) * 25; return o; },
+    setDragCue: (c) => rcues.push(c.active ? (c.cancel ? 'cancel' : 'active') : 'off')
+  };
+  ui.app = {
+    input: { cue }, renderer, sfx: (name) => sounds.push(name),
+    audio: { vibrate: (ms) => { buzzes.push(ms); return true; } }
+  };
   const game = { piece: { x: 6, y: 10, shape: { w: 2, h: 3 } }, readyProgress: 0.5 };
   const lifted = () => ui.slots.map((s) => s.btn.classList.contains('is-lifted'));
   const has = (n, c) => n.classList.contains(c);
+  const sync = (slot, zone) => { cue.slot = slot; cue.zone = zone; ui._syncDrag(game); };
 
   ui._syncDrag(game);
   assert.deepStrictEqual(lifted(), [false, false, false]);
   assert.ok(!has(tray, 'is-dragging') && !has(tray, 'is-cancel') && dropCue.hidden);
-  // Picked up, still over the tray
-  cue.slot = 1;
-  cue.zone = 'cancel';
-  ui._syncDrag(game);
+  assert.deepStrictEqual(rcues, ['off']);
+  // Picked up, still over the tray: letting go would cancel (no buzz: it never left the tray)
+  sync(1, 'cancel');
   assert.deepStrictEqual(lifted(), [false, true, false], 'the dragged slot is lifted');
-  assert.ok(has(tray, 'is-cancel') && !has(tray, 'is-dragging') && has(ui.root, 'is-dragging'));
-  assert.strictEqual(trayCue.textContent, 'Release to cancel');
-  // Over the playfield
-  cue.zone = 'field';
-  ui._syncDrag(game);
-  assert.ok(has(tray, 'is-dragging') && !has(tray, 'is-cancel'));
-  assert.ok(/drop/.test(trayCue.textContent) && /cancel/.test(trayCue.textContent), 'says how to drop and cancel');
+  assert.ok(has(tray, 'is-cancel') && !has(tray, 'is-dragging') && has(ui.root, 'is-dragging') && has(ui.root, 'is-drag-cancel'));
+  assert.strictEqual(trayCue.textContent, '✕ Release to cancel');
+  assert.deepStrictEqual(rcues, ['off', 'cancel'], 'the renderer greys the piece out');
+  assert.deepStrictEqual(buzzes, []);
+  // Over the playfield: a calm hint, the piece and its ghost are normal again
+  sync(1, 'field');
+  assert.ok(has(tray, 'is-dragging') && !has(tray, 'is-cancel') && !has(ui.root, 'is-drag-cancel'));
+  assert.strictEqual(trayCue.textContent, 'Let go to drop · drag back here to cancel');
+  assert.deepStrictEqual(rcues, ['off', 'cancel', 'active']);
   const writes = trayCue.writes;
   for (let i = 0; i < 5; i++) ui._syncDrag(game);
   assert.strictEqual(trayCue.writes, writes, 'the DOM changes only when the state does');
+  assert.strictEqual(rcues.length, 3, '...and so does the renderer cue');
+  // Each entry into the cancel zone buzzes once (10 ms); crossing back clears the cue
+  sync(1, 'cancel');
+  ui._syncDrag(game);
+  assert.deepStrictEqual(buzzes, [10], 'one short buzz on the way in');
+  assert.ok(has(tray, 'is-cancel') && trayCue.textContent === '✕ Release to cancel');
+  sync(1, 'field');
+  assert.ok(!has(tray, 'is-cancel') && !has(ui.root, 'is-drag-cancel'), 'back over the playfield: cleared');
+  sync(1, 'cancel');
+  assert.deepStrictEqual(buzzes, [10, 10], 'once per entry');
+  assert.deepStrictEqual(rcues.slice(3), ['cancel', 'active', 'cancel']);
+  // Let go there: everything resets, "Cancelled" for a moment with the soft cancel sound
+  cue.cancels = 1;
+  sync(-1, '');
+  assert.deepStrictEqual(lifted(), [false, false, false]);
+  assert.ok(!has(tray, 'is-cancel') && !has(tray, 'is-dragging') && !has(ui.root, 'is-dragging') && !has(ui.root, 'is-drag-cancel'));
+  assert.strictEqual(rcues[rcues.length - 1], 'off', 'renderer cue reset');
+  assert.ok(has(tray, 'is-cancelled') && trayCue.textContent === 'Cancelled', '"Cancelled" in the tray');
+  assert.deepStrictEqual(sounds, ['cancel'], 'the cancel sound');
+  ui._syncDrag(game);
+  assert.deepStrictEqual(sounds, ['cancel'], 'once');
+  sync(0, 'field');                                   // a new drag at once: the flash gives way
+  assert.ok(!has(tray, 'is-cancelled') && has(tray, 'is-dragging'));
+  // The drag ends without a release in the cancel zone (a drop, pause, a menu, game over, blur):
+  // the cue resets quietly
+  sync(-1, '');
+  assert.ok(!has(tray, 'is-dragging') && !has(tray, 'is-cancelled') && rcues[rcues.length - 1] === 'off');
+  assert.deepStrictEqual(sounds, ['cancel'], 'no sound');
+  assert.deepStrictEqual(buzzes, [10, 10], 'no buzz');
+  sync(2, 'cancel');                                  // interrupted while over the cancel zone
+  sync(-1, '');
+  assert.ok(!has(tray, 'is-cancel') && !has(ui.root, 'is-drag-cancel') && rcues[rcues.length - 1] === 'off', 'reset');
+  assert.deepStrictEqual(sounds, ['cancel']);
+  // A new run never flashes what the previous one counted
+  ui.hud = {};
+  cue.cancels = 5;
+  ui._syncDrag(game);
+  assert.ok(!has(tray, 'is-cancelled') && sounds.length === 1, 'nothing to flash after bindGame');
+  ui._endCancelled();
   // Let go too early: the cue sits centred above the piece, with the readiness bar
   cue.slot = -1;
   cue.zone = '';
@@ -142,7 +214,8 @@ function el(tag) {
   ui._syncDrag(game);
   ui._clearDragCues();
   assert.deepStrictEqual(lifted(), [false, false, false]);
-  assert.ok(!has(tray, 'is-cancel') && !has(ui.root, 'is-dragging') && dropCue.hidden);
+  assert.ok(!has(tray, 'is-cancel') && !has(ui.root, 'is-dragging') && !has(ui.root, 'is-drag-cancel') && dropCue.hidden);
+  assert.strictEqual(rcues[rcues.length - 1], 'off', 'the renderer cue too');
 }
 
 // --- "Same seed" beside Restart and Play again: one setting, both boxes, labelled with the seed ------
@@ -200,6 +273,23 @@ function el(tag) {
     local.set(settingsKey, JSON.stringify({ restartSameSeed: true }));
     loadUI();
     assert.strictEqual(App.loadSettings().restartSameSeed, true);
+    // Block sets saved while pebble and crumble existed (with and without knownTypes) still load:
+    // removed keys are dropped, the rest of the choice is kept, types added since start enabled
+    const removed = ['pebble', 'crumble'];
+    const knownThen = TT.SPECIAL_KEYS.filter((k) => !removed.includes(k)).concat(removed);
+    for (const saved of [
+      { enabledTypes: ['steel', 'pebble', 'crumble', 'mine', 'bogus'], knownTypes: knownThen },
+      { enabledTypes: ['steel', 'pebble', 'crumble', 'mine'] }   // first release: no knownTypes
+    ]) {
+      local.set(settingsKey, JSON.stringify(saved));
+      loadUI();
+      const types = App.loadSettings().enabledTypes;
+      assert.ok(types.every((k) => TT.SPECIAL_KEYS.includes(k)), 'only current special types: ' + types);
+      assert.ok(types.includes('steel') && types.includes('mine'), 'the saved choice is kept');
+      for (const k of removed) if (!TT.SPECIAL_KEYS.includes(k)) assert.ok(!types.includes(k), k + ' is gone');
+      assert.ok(!types.includes('vine') && !types.includes('blackhole'), 'types switched off stay off');
+      if (!saved.knownTypes) assert.ok(types.includes('rubber') && types.includes('spikes'), 'types added since start enabled');
+    }
     local.clear();
     loadUI();
 
@@ -264,6 +354,254 @@ function el(tag) {
   } finally {
     delete global.screen;
     delete window.matchMedia;
+    if (realDoc === undefined) delete global.document; else global.document = realDoc;
+  }
+}
+
+// --- "?" badges on special blocks, block cards and the explorer: they pause, closing resumes -------
+{
+  local.clear();
+  const { UI } = loadUI();
+  const realDoc = global.document;
+  global.document = {
+    readyState: 'loading', addEventListener() {}, activeElement: null, createElement: el,   // boot() never runs
+    getElementById: () => ({ getBoundingClientRect: () => ({ width: 0, height: 0 }) }),
+    documentElement: { classList: { toggle() {} } }
+  };
+  globalThis.performance = { now: () => 5000 };
+  try {
+    delete require.cache[require.resolve(MAIN_FILE)];
+    require(MAIN_FILE);
+    const App = TT.App;
+    const pct = TT.UI.formatPct;
+    App.settings = App.loadSettings();
+    App.renderer = null;
+    App.audio = null;
+    let pressing = false, releases = 0;
+    App.input = { reset() {}, releaseAll() { releases++; }, isActive: () => false, isPressing: () => pressing };
+
+    // The real UI screen stack, slots, explorer and card over a fake DOM
+    const ui = Object.create(UI.prototype);
+    const screen = (name) => Object.assign(el('section'), { name, querySelector: () => null, querySelectorAll: () => [], contains: () => false });
+    Object.assign(ui, {
+      app: App, game: null, stack: [], hud: {}, _exploreRows: [], _info: null, _overAt: -Infinity, _dirtyPreviews: true,
+      _toasts: [], _toastQueue: [], _toastNext: 0,
+      root: Object.assign(el('div'), { contains: () => true, querySelector: () => el('div'), querySelectorAll: () => [] }),
+      screens: { pause: screen('pause'), odds: screen('odds'), explore: screen('explore'), blockinfo: screen('blockinfo') },
+      el: {
+        exploreBody: el('div'),
+        info: {
+          panel: el('div'), canvas: el('canvas'), cat: el('p'), name: el('h2'), desc: el('p'),
+          unlock: el('dd'), odds: el('dd'), note: el('p'), all: el('button')
+        }
+      }
+    });
+    ui.bindGame = (g) => { ui.game = g; };
+    ui._syncInert = () => {};
+    ui._focusInitial = () => {};
+    ui._prepPause = () => {};
+    ui._buildOdds();
+    App.ui = ui;
+    const card = ui.el.info;
+    const names = () => ui.stack.map((s) => s.name);
+    const key = (k, extra) => Object.assign({
+      key: k, repeat: false, ctrlKey: false, metaKey: false, altKey: false, target: null, defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; }
+    }, extra || {});
+    // A pointer click on a HUD / tray button
+    const button = (dataset) => {
+      const b = { dataset, blurs: 0, blur() { b.blurs++; } };
+      b.closest = (sel) => (sel === '[data-action]' ? b : sel === '.hud' ? {} : null);
+      return b;
+    };
+    const badge = (i) => button({ action: 'block-info', help: String(i) });
+
+    // The badge is on the special blocks of the tray only (cold / warm), and only while they wait
+    const mkSlot = (i) => {
+      const btn = el('button');
+      btn.dataset.slot = String(i);
+      const help = el('button');
+      help.hidden = true;
+      return { btn, canvas: el('canvas'), name: el('span'), cat: el('span'), help, spec: undefined, used: null, sel: null, helpKey: undefined };
+    };
+    ui.slots = [0, 1, 2].map(mkSlot);
+    const tray = [
+      { spec: { n: 0, typeKey: 'normal', shapeId: 'T0' }, used: false },
+      { spec: { n: 1, typeKey: 'steel', shapeId: 'L0' }, used: false },
+      { spec: { n: 2, typeKey: 'mine', shapeId: 'O0' }, used: false }
+    ];
+    const syncTray = () => tray.forEach((b, i) => ui._syncSlot(ui.slots[i], b, i === 0));
+    const shown = () => ui.slots.map((s) => !s.help.hidden);
+    syncTray();
+    assert.deepStrictEqual(shown(), [false, true, true], 'a "?" on the special blocks, none on stone');
+    assert.ok(ui.slots[1].help.classList.contains('cat-positive') && ui.slots[2].help.classList.contains('cat-negative'),
+      'cold for a good block, warm for a bad one');
+    assert.strictEqual(ui.slots[2].help.getAttribute('aria-label'), 'What does Mine do?');
+    let helpSyncs = 0;
+    const syncHelp = ui._syncHelp;
+    ui._syncHelp = function (...a) { helpSyncs++; return syncHelp.apply(this, a); };
+    for (let i = 0; i < 5; i++) syncTray();
+    assert.strictEqual(helpSyncs, 0, 'the DOM changes only when the slot does');
+    tray[2].used = true;
+    syncTray();
+    assert.deepStrictEqual(shown(), [false, true, false], 'gone once the block is placed');
+    ui._syncSlot(ui.slots[1], null, false);
+    assert.deepStrictEqual(shown(), [false, false, false], 'none while the next batch is on its way');
+    ui._syncSlot(ui.slots[0], { spec: { n: 3, typeKey: 'vine', shapeId: 'S0' }, used: false }, true);
+    assert.ok(shown()[0] && ui.slots[0].help.classList.contains('cat-positive'), 'a new batch: the badge follows its block');
+    ui._syncSlot(ui.slots[0], { spec: { n: 4, typeKey: 'rubber', shapeId: 'S0' }, used: false }, true);
+    assert.ok(ui.slots[0].help.classList.contains('cat-negative') && !ui.slots[0].help.classList.contains('cat-positive'));
+    ui._syncHelp = syncHelp;
+
+    // A run with Vine switched off; slot 2 holds a Steel, slot 3 a Mine
+    const off = TT.SPECIAL_KEYS.filter((k) => k !== 'vine');
+    App.startGame({ seed: 'HELPUI', mode: 'assisted', enabledTypes: off });
+    const g = App.game;
+    for (let i = 0; i < 5 && !g.piece; i++) g.update(1 / 60);
+    assert.ok(g.piece && g.batch.length === 3 && g.state === 'playing');
+    g.batch[1].spec.typeKey = 'steel';
+    g.batch[2].spec.typeKey = 'mine';
+    const sel0 = g.selected, x0 = g.piece.x;
+    let selects = 0, drops = 0;
+    g.on('select', () => selects++);
+    g.on('drop', () => drops++);
+    const untouched = (what) => {
+      assert.ok(g.selected === sel0 && selects === 0 && g.piece.x === x0, what + ': nothing selected or moved');
+      assert.ok(g.turn === 0 && drops === 0 && !g.batch[1].used && !g.batch[2].used, what + ': nothing dropped');
+    };
+
+    // Pressing the badge of block 2 opens that block's card: the game pauses until it closes
+    const r0 = releases;
+    ui._onClick({ target: badge(1), detail: 1 });
+    assert.strictEqual(g.state, 'paused', 'the card pauses the game');
+    assert.deepStrictEqual(names(), ['blockinfo']);
+    assert.ok(releases > r0, 'a block in hand goes back first');
+    assert.strictEqual(card.name.textContent, 'Steel');
+    assert.strictEqual(card.cat.textContent, 'Good block');
+    assert.strictEqual(card.desc.textContent, TT.BLOCK_TYPES.steel.desc);
+    assert.strictEqual(card.unlock.textContent, 'From the start');
+    assert.strictEqual(card.odds.textContent, pct(g.odds.types.steel), 'its current odds');
+    assert.ok(card.panel.classList.contains('cat-positive') && !card.odds.classList.contains('is-dim'));
+    assert.strictEqual(ui._info.spec, g.batch[1].spec, 'the dealt block is previewed exactly as it will look');
+    assert.ok(!card.all.hidden, '"All special blocks" is offered');
+    untouched('badge');
+    ui._run('back', button({ action: 'back' }));                 // Close
+    assert.deepStrictEqual(names(), []);
+    assert.strictEqual(g.state, 'playing', 'closing the card resumes');
+    // A bad block that is not unlocked yet; Esc closes
+    ui._onClick({ target: badge(2), detail: 1 });
+    assert.ok(g.state === 'paused' && card.name.textContent === 'Mine' && card.cat.textContent === 'Bad block');
+    assert.ok(card.panel.classList.contains('cat-negative') && !card.panel.classList.contains('cat-positive'));
+    assert.strictEqual(card.unlock.textContent, 'From ' + TT.BLOCK_TYPES.mine.unlock + ' m');
+    assert.strictEqual(card.odds.textContent, 'unlocks at ' + TT.BLOCK_TYPES.mine.unlock + ' m');
+    assert.ok(card.odds.classList.contains('is-dim'));
+    const esc = key('Escape');
+    ui._onKey(esc);
+    assert.ok(esc.defaultPrevented && !names().length && g.state === 'playing', 'Esc closes it and resumes');
+    untouched('second badge');
+    // A switched-off block says so
+    assert.ok(App.showBlockInfo('vine'));
+    assert.strictEqual(card.odds.textContent, 'off');
+    ui.back();
+    // Another finger while a block is dragged: ignored like any extra finger
+    pressing = true;
+    ui._onClick({ target: badge(1), detail: 1 });
+    assert.ok(g.state === 'playing' && !names().length, 'no card mid-drag');
+    pressing = false;
+    // Only special blocks have a card; nothing while the run is ending
+    assert.strictEqual(App.showBlockInfo('normal'), false);
+    assert.strictEqual(App.showBlockInfo('bogus'), false);
+    g.ending = true;
+    assert.ok(!App.showBlockInfo('steel') && !App.showExplorer() && g.state === 'playing', 'not during the final collapse');
+    g.ending = false;
+    // Already paused (pause menu): the card opens on top and closing goes back there, still paused
+    App.pause();
+    assert.deepStrictEqual(names(), ['pause']);
+    assert.ok(App.showBlockInfo('frost'));
+    assert.deepStrictEqual(names(), ['pause', 'blockinfo']);
+    assert.strictEqual(ui._info.spec.n, -1, 'a sample block when it is not in the tray');
+    ui.back();
+    assert.deepStrictEqual(names(), ['pause']);
+    assert.strictEqual(g.state, 'paused', 'it was paused before: it stays paused');
+    App.resume();
+    assert.strictEqual(g.state, 'playing');
+
+    // The "?" button in the HUD: the explorer of every special block, grouped good / bad
+    const tip = Object.assign(el('div'), { _opts: { id: 'drag-tip', kind: 'info' } });
+    const warn = Object.assign(el('div'), { _opts: { kind: 'warn' } });
+    ui._toasts.push(tip, warn);
+    const helpBtn = button({ action: 'explore' });
+    ui._onClick({ target: helpBtn, detail: 1 });
+    assert.strictEqual(g.state, 'paused', 'the explorer pauses the game');
+    assert.deepStrictEqual(names(), ['explore']);
+    assert.strictEqual(helpBtn.blurs, 1, 'the HUD button lets go of the focus');
+    assert.deepStrictEqual(ui._toasts, [warn], 'a tip would cover the panel header: it goes (warnings stay)');
+    ui._toasts.length = 0;
+    const rows = findAll(ui.el.exploreBody, (n) => n.dataset.action === 'explore-row');
+    assert.deepStrictEqual(rows.map((r) => r.dataset.key).sort(), TT.SPECIAL_KEYS.slice().sort(), 'every special block, once');
+    const groups = findAll(ui.el.exploreBody, (n) => n.tagName === 'SECTION');
+    const keysIn = (sec) => findAll(sec, (n) => n.dataset.action === 'explore-row').map((r) => r.dataset.key).sort();
+    assert.ok(groups.length === 2 && groups[0].classList.contains('group-positive') && groups[1].classList.contains('group-negative'));
+    assert.deepStrictEqual(keysIn(groups[0]), TT.POSITIVE_KEYS.slice().sort(), 'good blocks first');
+    assert.deepStrictEqual(keysIn(groups[1]), TT.NEGATIVE_KEYS.slice().sort(), 'then the bad ones');
+    const row = (k) => rows.find((r) => r.dataset.key === k);
+    const part = (r, cls) => findAll(r, (n) => n.className === cls)[0].textContent;
+    for (const k of TT.SPECIAL_KEYS) {
+      const t = TT.BLOCK_TYPES[k];
+      assert.strictEqual(part(row(k), 'explore-name'), t.name);
+      assert.strictEqual(part(row(k), 'explore-desc'), t.desc, k + ': what it does');
+      assert.strictEqual(part(row(k), 'explore-unlock'), t.unlock > 0 ? 'Appears from ' + t.unlock + ' m' : 'Appears from the start');
+      assert.ok(findAll(row(k), (n) => n.dataset.preview === k).length === 1, k + ': a preview');
+    }
+    assert.strictEqual(part(row('steel'), 'explore-val'), pct(g.odds.types.steel), 'current odds');
+    assert.ok(row('steel').classList.contains('is-on'));
+    assert.strictEqual(part(row('vine'), 'explore-val'), 'off', 'switched off for this run');
+    assert.ok(row('vine').classList.contains('is-off'));
+    assert.strictEqual(part(row('blackhole'), 'explore-val'), 'unlocks at ' + TT.BLOCK_TYPES.blackhole.unlock + ' m');
+    assert.ok(row('blackhole').classList.contains('is-locked'));
+    // A row opens its card over the list; Close comes back to it, with that row marked
+    ui._run('explore-row', row('crystal'));
+    assert.deepStrictEqual(names(), ['explore', 'blockinfo']);
+    assert.ok(card.name.textContent === 'Crystal Heart' && card.all.hidden, 'no "All special blocks" link back to where it came from');
+    ui.back();
+    assert.deepStrictEqual(names(), ['explore']);
+    assert.ok(g.state === 'paused' && row('crystal').classList.contains('is-current'), 'back in the list, still paused');
+    ui._run('back', button({ action: 'back' }));
+    assert.ok(!names().length && g.state === 'playing', 'closing the explorer resumes');
+    // From a card opened in the tray, "All special blocks" takes the card's place
+    ui._onClick({ target: badge(2), detail: 1 });
+    ui._run('explore', card.all);
+    assert.deepStrictEqual(names(), ['explore']);
+    assert.ok(row('mine').classList.contains('is-current') && !row('crystal').classList.contains('is-current'), 'that block marked');
+    ui.back();
+    assert.ok(!names().length && g.state === 'playing', 'one Close back to the game');
+    untouched('explorer');
+
+    // Keys in the menus: ? / H toggle the explorer (also from the pause menu or a card), P resumes
+    App.showExplorer();
+    let ev = key('?', { shiftKey: true });
+    ui._onKey(ev);
+    assert.ok(ev.defaultPrevented && !names().length && g.state === 'playing', '? closes the explorer');
+    App.pause();
+    ui._onKey(key('h'));
+    assert.deepStrictEqual(names(), ['pause', 'explore'], 'H from the pause menu opens it on top');
+    ui._onKey(key('H', { shiftKey: true }));
+    assert.deepStrictEqual(names(), ['pause'], '...and closes it again');
+    App.resume();
+    ui._onClick({ target: badge(1), detail: 1 });
+    ui._onKey(key('?', { shiftKey: true }));
+    assert.deepStrictEqual(names(), ['explore'], '? on a card: the full list');
+    ev = key('p');
+    ui._onKey(ev);
+    assert.ok(ev.defaultPrevented && !names().length && g.state === 'playing', 'P resumes from the explorer');
+    App.showBlockInfo('magnet');
+    ui._onKey(key('P', { shiftKey: true }));
+    assert.ok(!names().length && g.state === 'playing', '...and from a card');
+    ev = key('?', { shiftKey: true });
+    ui._onKey(ev);
+    assert.ok(!ev.defaultPrevented && !names().length, 'in play the keys are TT.Input\'s');
+    untouched('keys');
+  } finally {
     if (realDoc === undefined) delete global.document; else global.document = realDoc;
   }
 }
@@ -358,32 +696,32 @@ function el(tag) {
     // Tall playfield: up to three at once
     ui.onLayout();
     assert.ok(!ui._compact && !box.classList.contains('is-compact'));
-    ui.toast(intro('pebble'));
+    ui.toast(intro('rubber'));
     ui.toast(intro('steel'));
-    assert.deepStrictEqual(shown(), ['pebble', 'steel']);
+    assert.deepStrictEqual(shown(), ['rubber', 'steel']);
     // Rotated to landscape: a short playfield keeps one compact toast, the other intro waits
     stageH = 360;
     ui.onLayout();
     assert.ok(ui._compact && box.classList.contains('is-compact'), 'short playfield is compact');
     assert.strictEqual(ui._chipClear, 52, 'clearance above the odds chip');
     assert.deepStrictEqual(shown(), ['steel']);
-    assert.deepStrictEqual(ui._toastQueue.map((o) => o.intro), ['pebble'], 'the older intro waits');
+    assert.deepStrictEqual(ui._toastQueue.map((o) => o.intro), ['rubber'], 'the older intro waits');
     ui._toastQueue.length = 0;
     ui._dropToast(ui._toasts[0]);
     Storage.remove(Storage.KEYS.seen);
     Seen._set = null;
 
     // One at a time; an intro counts as seen only once it is shown
-    ui.toast(intro('pebble'));
+    ui.toast(intro('rubber'));
     ui.toast(intro('steel'));
-    assert.deepStrictEqual(shown(), ['pebble']);
-    assert.ok(Seen.has('pebble') && !Seen.has('steel'), 'the waiting intro is not marked seen yet');
+    assert.deepStrictEqual(shown(), ['rubber']);
+    assert.ok(Seen.has('rubber') && !Seen.has('steel'), 'the waiting intro is not marked seen yet');
     ui._updateToasts({ piece: null });
-    assert.deepStrictEqual(shown(), ['pebble'], 'no free spot');
+    assert.deepStrictEqual(shown(), ['rubber'], 'no free spot');
     // Feedback toasts show at once; the intro they push out waits for its turn again
     ui.toast({ id: 'mode', title: 'Manual mode', time: 2.2 });
     assert.deepStrictEqual(shown(), ['mode']);
-    assert.deepStrictEqual(ui._toastQueue.map((o) => o.intro), ['pebble', 'steel']);
+    assert.deepStrictEqual(ui._toastQueue.map((o) => o.intro), ['rubber', 'steel']);
     ui.toast({ id: 'mode', title: 'Assisted mode', time: 2.2 });
     assert.deepStrictEqual(shown(), ['mode'], 'same id replaces');
     fire(2200);                                    // the mode toast times out
@@ -395,7 +733,7 @@ function el(tag) {
     assert.deepStrictEqual(shown(), [], 'nothing new while a menu is open');
     ui.stack.length = 0;
     ui._updateToasts({ piece: null });
-    assert.deepStrictEqual(shown(), ['pebble']);
+    assert.deepStrictEqual(shown(), ['rubber']);
     // A press on the playfield dismisses it; the next intro follows
     ui._dismissToasts();
     assert.deepStrictEqual(shown(), []);

@@ -1,9 +1,13 @@
 /* Game rules: batches, selection, modes, readiness, lives per turn, milestones, game over,
- * determinism, and the assisted guided fall (a drifting support must not make a drop miss). */
+ * determinism, the weightless glide and soft landing (only the anvil falls with its weight),
+ * and the assisted guided fall (a drifting support must not make a drop miss). */
 'use strict';
 const assert = require('assert');
 const TT = require('./load-core')();
 const C = TT.CONFIG;
+const SOFT_IMPACT = C.SOFT_LAND_IMPACT != null ? C.SOFT_LAND_IMPACT : 2.5;
+// Six 1-wide columns fit on the platform, centred
+const COL_X0 = (C.PLATFORM_X0 + C.PLATFORM_X1 - 6) / 2;
 
 function run(game, seconds) {
   const steps = Math.round(seconds * 60);
@@ -119,7 +123,7 @@ function tallTower(seed) {
   const g = TT.Game.create({ seed, mode: 'fixed', enabledTypes: [] });
   const P = g.physics;
   for (let y = 0; y < 60; y += 4) {
-    for (let x = 5; x < 11; x++) P.makeStatic(P.createBlock({ typeKey: 'normal', shapeId: 'I1' }, x, y), 'steel');
+    for (let k = 0; k < 6; k++) P.makeStatic(P.createBlock({ typeKey: 'normal', shapeId: 'I1' }, COL_X0 + k, y), 'steel');
   }
   run(g, 8.5); // the hover line rises above the top
   return g;
@@ -133,7 +137,7 @@ function looseOnTop(g, x) {
   // Two blocks knocked off during turn 1, the second 1.1 s after the first; the next drop is
   // made as soon as the game allows it
   const g = tallTower('LATE');
-  const A = looseOnTop(g, 9), B = looseOnTop(g, 5);
+  const A = looseOnTop(g, COL_X0 + 4), B = looseOnTop(g, COL_X0);
   run(g, 2);
   assert.ok(g.canDrop && g.hoverY > g.towerTop);
   const lostIn = [];
@@ -159,7 +163,7 @@ function looseOnTop(g, x) {
   // void drop from the top (READY_MAX opens turn 2 long before it is gone) after turn 1 has
   // already lost a block
   const g = tallTower('LATE2');
-  const A = looseOnTop(g, 9);
+  const A = looseOnTop(g, COL_X0 + 4);
   run(g, 2);
   g.setTargetX(0);
   assert.ok(g.drop());
@@ -171,7 +175,7 @@ function looseOnTop(g, x) {
   assert.ok(g.drop());
   const lostIn = [];
   g.on('blockLost', (p) => lostIn.push([p.block === voidDrop, g.turn]));
-  run(g, 6);
+  run(g, 9);   // it glides ~70 m down at GLIDE_SPEED
   assert.deepStrictEqual(lostIn, [[true, 2]], 'it is lost during turn 2...');
   assert.strictEqual(g.lives, 2, '...but turn 1 already paid for its falls');
 }
@@ -235,6 +239,171 @@ function looseOnTop(g, x) {
   assert.ok(g.physics.time > t);
 }
 
+// --- weightless glide: no acceleration, a soft touchdown, weight back on after landing ------
+function forcePiece(g, typeKey, shapeId) {
+  g.batch[g.selected].spec = { n: -1, typeKey, shapeId };
+  g.selectSlot(g.selected);
+}
+// Drops the selected piece at x; samples its downward speed every frame until it first
+// touches something, and the speed it had in the substep it touched (lastVel)
+function watchDrop(g, x) {
+  assert.ok(waitReady(g));
+  g.setTargetX(x);
+  assert.ok(g.drop());
+  const b = g.physics.blocks[g.physics.blocks.length - 1];
+  const w = { block: b, speeds: [], touch: null, impact: null };
+  const off = g.on('land', (p) => {
+    if (p.block !== b) return;
+    w.touch = Math.hypot(b.lastVel.x, b.lastVel.y);
+    w.impact = p.impact;
+  });
+  for (let i = 0; i < 600 && !b.touched; i++) {
+    g.update(1 / 60);
+    if (!b.touched) w.speeds.push(-b.body.getLinearVelocity().y);
+  }
+  off();
+  assert.ok(b.touched, 'it landed');
+  w.max = Math.max(...w.speeds);
+  return w;
+}
+function platformGame(seed) {
+  const g = TT.Game.create({ seed, mode: 'fixed', enabledTypes: [] });
+  run(g, 0.1);
+  return g;
+}
+{
+  // A plain block onto a plank: glides at GLIDE_SPEED from the start, eases off and touches
+  // down on the support it was predicted to land on at about SOFT_LAND_SPEED
+  const g = platformGame('GLIDE');
+  const P = g.physics;
+  const plank = P.createBlock({ typeKey: 'normal', shapeId: 'I0' }, 6, 0);
+  plank.dropped = plank.touched = true;
+  run(g, 1.5);
+  forcePiece(g, 'normal', 'O0');
+  const w = watchDrop(g, 7);
+  const b = w.block;
+  assert.ok(!b.type.heavy);
+  assert.ok(Math.abs(b.landY - 1) < 0.05 && b.landOn === plank, 'landing predicted on the plank at y=' + b.landY);
+  assert.ok(Math.abs(w.speeds[0] - C.GLIDE_SPEED) < 1e-6, 'full glide speed right away, no acceleration: ' + w.speeds[0]);
+  assert.ok(w.max <= C.GLIDE_SPEED + 1e-6, 'never faster than GLIDE_SPEED: ' + w.max);
+  for (let i = 1; i < w.speeds.length; i++) assert.ok(w.speeds[i] <= w.speeds[i - 1] + 1e-9, 'it only ever slows down');
+  assert.ok(w.touch <= C.SOFT_LAND_SPEED + 0.1, 'soft touchdown at ' + w.touch.toFixed(3) + ' m/s');
+  assert.strictEqual(w.impact, Math.max(w.touch, SOFT_IMPACT), 'a soft landing reports a gentle but audible impact');
+  assert.ok(P.touching(b).some((t) => t.other === plank), 'it touched the plank');
+  assert.ok(!b.gliding && b.body.getGravityScale() === 1, 'weight back on after the touch');
+  assert.ok(waitReady(g), 'ready again');
+  assert.ok(b.settled && Math.abs(P.bounds(b).minY - 1) < 0.03, 'it settled on the plank');
+}
+{
+  // The anvil is the one block with weight: full gravity from DROP_START_SPEED, capped at
+  // MAX_FALL_SPEED, a hard impact, and a landing buzz (js/audio.js); soft landings never buzz
+  const g = platformGame('GLIDE');
+  const buzzes = [];
+  global.navigator.vibrate = (ms) => { buzzes.push(ms); return true; };
+  require('../js/audio.js');
+  TT.Audio.attach(g);
+  forcePiece(g, 'normal', 'O0');
+  const soft = watchDrop(g, 5.5);
+  assert.deepStrictEqual(buzzes, [], 'a soft landing does not buzz');
+  forcePiece(g, 'anvil', 'O0');
+  const w = watchDrop(g, 8.5);
+  TT.Audio.detach();
+  assert.ok(TT.BLOCK_TYPES.anvil.heavy && !w.block.gliding);
+  assert.ok(w.max > C.GLIDE_SPEED + 0.5, 'the anvil falls with its weight, at ' + w.max.toFixed(2) + ' m/s');
+  assert.ok(w.max <= C.MAX_FALL_SPEED + C.GRAVITY / C.PHYSICS_HZ + 1e-6, 'capped at MAX_FALL_SPEED (before each substep)');
+  assert.ok(w.speeds[0] < C.DROP_START_SPEED + 0.5, 'released at DROP_START_SPEED, then accelerating');
+  assert.ok(w.impact > C.GLIDE_SPEED && w.impact > soft.impact * 2.5, 'hard impact ' + w.impact.toFixed(2));
+  assert.strictEqual(w.block.body.getGravityScale(), 1, 'full gravity throughout');
+  assert.strictEqual(buzzes.length, 1, 'the anvil landing buzzes');
+}
+{
+  // A tall tower of loose blocks is not jolted when a block lands on it; an anvil jolts it
+  function jolt(typeKey, shapeId, x) {
+    const g = platformGame('JOLT');
+    const P = g.physics;
+    const tower = [];
+    let y = 0;
+    for (const [shapeId, bx, h] of [['I0', 5.5, 1], ['O0', 6.5, 2], ['I0', 5.5, 1], ['O0', 7, 2], ['I0', 6, 1], ['O0', 6.5, 2], ['I0', 5.5, 1], ['O0', 7, 2]]) {
+      const b = P.createBlock({ typeKey: 'normal', shapeId }, bx, y + 0.005);
+      b.dropped = b.touched = true;
+      tower.push(b);
+      y += h;
+    }
+    run(g, 3);
+    assert.ok(tower.every((b) => b.settled), 'the tower stands still');
+    const start = tower.map((b) => ({ x: b.body.getPosition().x, y: b.body.getPosition().y }));
+    forcePiece(g, typeKey, shapeId);
+    g.setTargetX(x);
+    assert.ok(waitReady(g) && g.drop());
+    const dropped = P.blocks[P.blocks.length - 1];
+    let move = 0, speed = 0;
+    for (let i = 0; i < 240; i++) {
+      g.update(1 / 60);
+      tower.forEach((b, k) => {
+        if (b.dead) return;
+        const p = b.body.getPosition(), v = b.body.getLinearVelocity();
+        move = Math.max(move, Math.hypot(p.x - start[k].x, p.y - start[k].y));
+        speed = Math.max(speed, Math.hypot(v.x, v.y));
+      });
+    }
+    assert.ok(dropped.touched && !dropped.dead);
+    return { move, speed, smashed: tower.filter((b) => b.dead).length };
+  }
+  for (const [shapeId, x] of [['O0', 7], ['I0', 5.5], ['T0', 6.5]]) {
+    const soft = jolt('normal', shapeId, x);
+    assert.ok(soft.move < 0.02, shapeId + ': the blocks below barely move (' + soft.move.toFixed(4) + ' m)');
+    assert.ok(soft.speed < 0.4, shapeId + ': ...and are not knocked (' + soft.speed.toFixed(3) + ' m/s)');
+    assert.strictEqual(soft.smashed, 0);
+  }
+  const hard = jolt('anvil', 'O0', 7);
+  assert.strictEqual(hard.smashed, 1, 'the anvil smashed the top block');
+  assert.ok(hard.move > 0.03 && hard.speed > 1, 'and visibly jolts the rest (' + hard.move.toFixed(3) + ' m, ' + hard.speed.toFixed(2) + ' m/s)');
+}
+{
+  // A void drop glides all the way down at GLIDE_SPEED; a blast blows a gliding block away
+  // with its weight back on; and when the run ends mid-glide the collapse falls for real
+  const g = platformGame('GLIDEVOID');
+  forcePiece(g, 'normal', 'O0');
+  g.setTargetX(0);
+  assert.ok(g.drop());
+  const v = g.physics.blocks[g.physics.blocks.length - 1];
+  assert.strictEqual(v.landY, null, 'nothing below');
+  let max = 0;
+  for (let i = 0; i < 240 && !v.dead; i++) {
+    g.update(1 / 60);
+    if (!v.dead) max = Math.max(max, -v.body.getLinearVelocity().y);
+  }
+  assert.ok(v.dead && v.deathReason === 'lost' && !v.gliding && Math.abs(max - C.GLIDE_SPEED) < 1e-6, 'glided into the void and was lost');
+
+  const g2 = platformGame('GLIDEKICK');
+  forcePiece(g2, 'normal', 'O0');
+  g2.setTargetX(7);
+  assert.ok(g2.drop());
+  const k = g2.physics.blocks[g2.physics.blocks.length - 1];
+  run(g2, 0.1);
+  const p = k.body.getPosition();
+  TT.Effects.explode(g2, p.x + 1, p.y + 0.4);   // just below its centre
+  g2.update(1 / 60);
+  const v1 = -k.body.getLinearVelocity().y;
+  g2.update(1 / 60);
+  const v2 = -k.body.getLinearVelocity().y;
+  assert.ok(!k.touched && !k.gliding && k.body.getGravityScale() === 1, 'weight back on');
+  assert.ok(v1 < C.GLIDE_SPEED - 1 && v2 > v1 + 0.3, 'knocked out of its glide, then falling with gravity (' + v1.toFixed(2) + ' -> ' + v2.toFixed(2) + ' m/s)');
+
+  const g3 = platformGame('GLIDEEND');
+  g3.lives = 1;
+  forcePiece(g3, 'normal', 'O0');
+  g3.setTargetX(7);
+  assert.ok(g3.drop());
+  const last = g3.physics.blocks[g3.physics.blocks.length - 1];
+  const off = g3.physics.createBlock({ typeKey: 'normal', shapeId: 'O0' }, 14, 1);  // falls off during turn 1
+  for (let i = 0; i < 120 && !g3.ending; i++) g3.update(1 / 60);
+  assert.ok(off.dead && g3.ending && g3.lives === 0, 'the last life is lost');
+  assert.ok(!last.touched && !last.gliding && last.body.getGravityScale() === 1, 'the falling block has its weight back');
+  run(g3, 2);
+  assert.ok(last.touched && g3.state === 'over');
+}
+
 // --- assisted guided fall: support shoved mid-fall, drop still lands flush -----------------
 {
   const g = TT.Game.create({ seed: 'GUIDE', mode: 'assisted' });
@@ -264,16 +433,17 @@ function looseOnTop(g, x) {
 }
 
 // --- assisted guided fall: a support sliding steadily the whole time ------------------------
-for (const vx of [0.3, 0.6]) {
+for (const [vx, plankX] of [[0.3, 5.25], [0.6, 5.25], [0.3, 5], [0.6, 5]]) {   // 5: its spots tie with the half grid
   const g = TT.Game.create({ seed: 'GUIDEFF', mode: 'assisted' });
   run(g, 0.1);
   const P = g.physics;
-  // A plank sliding frictionlessly at a constant speed on a frozen oil slick
+  // A plank sliding frictionlessly at a constant speed on a frozen oil slick (a quarter cell
+  // off the slick's corners and the half grid, so its own spots never tie with theirs)
   const oil = P.createBlock({ typeKey: 'oil', shapeId: 'I0' }, 5, 0);
   oil.dropped = oil.touched = true;
   run(g, 1);
   P.makeStatic(oil, 'steel');
-  const plank = P.createBlock({ typeKey: 'normal', shapeId: 'I0' }, 5, 1);
+  const plank = P.createBlock({ typeKey: 'normal', shapeId: 'I0' }, plankX, 1);
   plank.dropped = plank.touched = true;
   run(g, 0.5);
   const push = () => plank.body.setLinearVelocity({ x: vx, y: plank.body.getLinearVelocity().y });

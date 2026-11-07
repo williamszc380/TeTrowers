@@ -4,8 +4,14 @@
  * elements of index.html, shown as a stack (title > settings, pause > how to play, ...).
  * The HUD reads the bound game's public fields once per frame and touches the DOM only when
  * a displayed value changed, so a running game costs a few comparisons per frame. The same goes
- * for the drag cues (lifted slot, "Release to cancel" over the tray, "Dropping when ready" over
- * the playfield), which mirror TT.Input's `cue`.
+ * for the drag cues, which mirror TT.Input's `cue`: the lifted slot, the tray turning into a red
+ * "Release to cancel" target while the block in hand is outside the playfield (the renderer greys
+ * the piece out and hides its ghost meanwhile, see renderer.setDragCue), a short buzz on entering
+ * that zone, "Cancelled" plus a soft sound when a drag is let go there, and "Dropping when ready"
+ * by the piece.
+ * Special blocks explain themselves: a "?" badge on each special block in the tray opens that
+ * block's card, and the "?" button in the HUD opens the explorer of every special block (both pause
+ * the game like the odds panel; main.js showPanel).
  * Also home of TT.Storage and the best-score / seen-type records: every localStorage access
  * is wrapped in try/catch with an in-memory fallback, so private browsing still works.
  */
@@ -24,8 +30,12 @@
   const SHARE_URL = (C.SHARE_URL != null ? C.SHARE_URL : 'https://williamszc380.github.io/TeTrowers/');
   const PREVIEW_MAX_DPR = 2;
   const LIST_PREVIEW_CELL = 13; // CSS px per cell in the codex / toggle lists (tray slots fit a 4x4 piece)
-  const ODDS_PREVIEW_CELL = 8;  // ...and in the odds panel rows
+  const ODDS_PREVIEW_CELL = 8;  // ...in the odds panel rows
+  const EXPLORE_PREVIEW_CELL = 11;  // ...in the special-block explorer
+  const INFO_PREVIEW_CELL = 26;     // ...and on a block's card
   const CUE_GAP = 8;            // CSS px between the hovering piece and the "Dropping when ready" cue
+  const CANCEL_BUZZ_MS = (C.CANCEL_BUZZ_MS != null ? C.CANCEL_BUZZ_MS : 10);   // vibration on entering the cancel zone
+  const CANCELLED_MS = 800;     // the "Cancelled" flash in the tray
   const DRAG_TIP = '#drag';     // Seen key of the one-time "how to drop" tip
   // ms the game-over buttons ignore presses (the player may still be hammering Space / Enter)
   const OVER_GUARD_MS = (C.OVER_GUARD_MS != null ? C.OVER_GUARD_MS : 800);
@@ -33,22 +43,25 @@
   const GUARD_LEAVE_MS = 2000;      // our own history.back() must report back within this
 
   const MODE_INFO = Object.freeze({
-    assisted: { name: 'Assisted', hint: 'Snaps flush with the block below and guides the falling block onto its target.' },
+    assisted: { name: 'Assisted', hint: 'Half-block steps plus spots flush with the corners below; guides the falling block onto its target.' },
     fixed: { name: 'Fixed', hint: 'Half-block steps, no help while falling.' },
     manual: { name: 'Manual', hint: 'Pixel-precise: tap for one pixel, hold to slide.' }
   });
 
   const CATEGORY_TEXT = { positive: 'Good block', negative: 'Bad block', normal: 'Normal block' };
   const GAME_ACTIONS = new Set(['mode', 'slot']);
+  // Tall panels opened over a run (main.js showPanel): they clear the toasts, which would cover their header
+  const PLAY_PANELS = new Set(['odds', 'explore', 'blockinfo']);
   const CUE_TEXT = {
-    field: 'Let go over the playfield to drop it · drag back here to cancel',
-    cancel: 'Release to cancel'
+    field: 'Let go to drop · drag back here to cancel',
+    cancel: '✕ Release to cancel'
   };
+  const CANCELLED_TEXT = 'Cancelled';
 
-  // Preview shapes for types that do not force one (codex and toggle lists)
+  // Preview shapes for the codex and toggle lists (every block is a tetromino)
   const SAMPLE_SHAPES = {
     normal: 'L0', steel: 'O0', vine: 'S0', crystal: 'T0', frost: 'J0', magnet: 'L0',
-    crumble: 'L0', rubber: 'S0', oil: 'Z0', glass: 'J0', mine: 'T2', magma: 'O0', spikes: 'I0',
+    rubber: 'S0', oil: 'Z0', glass: 'J0', mine: 'T2', magma: 'O0', spikes: 'I0',
     anvil: 'T0', blackhole: 'O0'
   };
 
@@ -180,6 +193,22 @@
 
   function unlockLabel(type) {
     return type.unlock > 0 ? 'Appears from ' + type.unlock + ' m' : 'Appears from the start';
+  }
+
+  function isSpecial(key) {
+    const t = TT.BLOCK_TYPES[key];
+    return !!t && (t.category === 'positive' || t.category === 'negative');
+  }
+
+  // A special type in the next deal (o = Generator.typeOdds): 'on' (it can be dealt), 'off' (switched
+  // off in Special Blocks) or 'locked' (best height below its unlock), and the text shown for it
+  function typeState(o, enabled, key) {
+    return o.types[key] != null ? 'on' : !enabled.has(key) ? 'off' : 'locked';
+  }
+
+  function typeOddsText(o, enabled, key) {
+    const state = typeState(o, enabled, key);
+    return state === 'on' ? fmtPct(o.types[key]) : state === 'off' ? 'off' : 'unlocks at ' + TT.BLOCK_TYPES[key].unlock + ' m';
   }
 
   function shareLink(seed) {
@@ -328,7 +357,10 @@
       this._stageW = 0;
       this._cueW = 0;           // measured size of the "Dropping when ready" cue (0 = measure again)
       this._cueH = 0;
+      this._cancelledTimer = 0; // ends the "Cancelled" flash
       this._chipClear = 0;      // px the portrait odds chip covers at the bottom of the playfield
+      this._info = null;        // the block on the card: { key, spec }
+      this._exploreRows = [];   // explorer rows (odds rows too, see _syncOdds)
       this._pt = { x: 0, y: 0 };
 
       const q = (sel) => this.root.querySelector(sel);
@@ -353,14 +385,20 @@
         overDrops: q('#over-drops'), overLost: q('#over-lost'), overSeed: q('#over-seed'),
         overPrev: q('#over-prev'), copyBtn: q('#btn-copy'), copyFallback: q('#copy-fallback'),
         sameSeed: Array.from(this.root.querySelectorAll('[data-setting="restartSameSeed"]')),
-        sameSeedVal: Array.from(this.root.querySelectorAll('[data-same-seed]'))
+        sameSeedVal: Array.from(this.root.querySelectorAll('[data-same-seed]')),
+        exploreBody: q('#explore-body'),
+        info: {
+          panel: q('#info-panel'), canvas: q('#info-canvas'), cat: q('#info-cat'), name: q('#info-name'),
+          desc: q('#info-desc'), unlock: q('#info-unlock'), odds: q('#info-odds'), note: q('#info-note'), all: q('#info-all')
+        }
       };
       this.slots = Array.from(this.root.querySelectorAll('.slot')).map((btn) => ({
         btn,
         canvas: btn.querySelector('.slot-canvas'),
         name: btn.querySelector('.slot-name'),
         cat: btn.querySelector('.slot-cat'),
-        spec: undefined, used: null, sel: null   // what the slot currently shows
+        help: this.root.querySelector('[data-help="' + btn.dataset.slot + '"]'),   // its "?" badge
+        spec: undefined, used: null, sel: null, helpKey: undefined   // what the slot currently shows
       }));
 
       this.el.version.textContent = 'v' + C.VERSION;
@@ -380,7 +418,7 @@
     bindGame(game) {
       this.game = game;
       this.hud = {};
-      for (const s of this.slots) { s.spec = undefined; s.used = null; s.sel = null; }
+      for (const s of this.slots) { s.spec = undefined; s.used = null; s.sel = null; s.helpKey = undefined; }
       this.root.classList.toggle('no-game', !game);
       const seedEl = this.el.seed;
       seedEl.textContent = '';
@@ -392,7 +430,7 @@
       // Dragging is the only way to drop by touch or mouse: say so once
       if (game && !Seen.has(DRAG_TIP)) {
         Seen.add(DRAG_TIP);
-        this.toast({ id: 'drag-tip', title: 'Drag a block onto the playfield', text: 'Let go to drop it, or drag it back to the tray to cancel.', time: 7 });
+        this.toast({ id: 'drag-tip', title: 'Drag a block onto the playfield', text: 'Or drag on the playfield. Let go there to drop it, or drag back to the tray to cancel.', time: 7 });
       }
     }
 
@@ -486,26 +524,54 @@
         slot.btn.setAttribute('aria-pressed', String(selected));
         slot.sel = selected;
       }
+      // The "?" badge: on a special block that is still to be placed
+      const helpKey = !used && isSpecial(spec.typeKey) ? spec.typeKey : '';
+      if (slot.helpKey !== helpKey) this._syncHelp(slot, helpKey);
       return ok;
     }
 
+    _syncHelp(slot, key) {
+      slot.helpKey = key;
+      const h = slot.help;
+      if (!h) return;
+      h.hidden = !key;
+      h.classList.remove('cat-positive', 'cat-negative');
+      if (!key) return;
+      const type = TT.BLOCK_TYPES[key];
+      h.classList.add(categoryClass(type));
+      const label = 'What does ' + type.name + ' do?';
+      h.setAttribute('aria-label', label);
+      h.title = label;
+    }
+
     // ---- drag cues (state from TT.Input) ----------------------------------------------------
-    // The lifted slot; the tray reads "Release to cancel" while the drag is over it (or anywhere
-    // else that is not the playfield); "Dropping when ready" sits by the piece while a drop waits.
+    // The lifted slot. Over the playfield the tray shows a calm hint; anywhere else (where letting
+    // go cancels) it turns into a red "Release to cancel" target, the piece is greyed out and
+    // crossed (renderer.setDragCue) and the phone buzzes once on the way in. A drag let go there
+    // flashes "Cancelled" with a soft sound. "Dropping when ready" sits by the piece while a drop waits.
     _syncDrag(g) {
       const c = this.app && this.app.input ? this.app.input.cue : null;
       const h = this.hud, e = this.el;
       const lifted = c ? c.slot : -1, zone = (c && c.zone) || '', queued = !!(c && c.queued);
+      const cancels = c ? c.cancels | 0 : 0;
       if (h.lifted !== lifted) {
         for (let i = 0; i < this.slots.length; i++) this.slots[i].btn.classList.toggle('is-lifted', i === lifted);
         h.lifted = lifted;
       }
       if (h.zone !== zone) {
+        if (zone === 'cancel' && h.zone === 'field') this._buzz(CANCEL_BUZZ_MS);
+        if (zone) this._endCancelled();
         e.hudTray.classList.toggle('is-dragging', zone === 'field');
         e.hudTray.classList.toggle('is-cancel', zone === 'cancel');
         this.root.classList.toggle('is-dragging', !!zone);
+        this.root.classList.toggle('is-drag-cancel', zone === 'cancel');
         if (zone) e.trayCue.textContent = CUE_TEXT[zone] || '';
+        this._rendererCue(zone);
         h.zone = zone;
+      }
+      if (h.cancels !== cancels) {
+        if (h.cancels != null && cancels > h.cancels && !zone) this._flashCancelled();
+        h.cancels = cancels;
       }
       if (h.queued !== queued) {
         e.dropCue.hidden = !queued;
@@ -544,8 +610,39 @@
       const e = this.el;
       for (const s of this.slots) s.btn.classList.remove('is-lifted');
       e.hudTray.classList.remove('is-dragging', 'is-cancel');
-      this.root.classList.remove('is-dragging');
+      this.root.classList.remove('is-dragging', 'is-drag-cancel');
+      this._endCancelled();
+      this._rendererCue('');
       e.dropCue.hidden = true;
+    }
+
+    // The renderer greys out and crosses the piece (and hides its ghost) while letting go would cancel
+    _rendererCue(zone) {
+      const r = this.app && this.app.renderer;
+      if (r && typeof r.setDragCue === 'function') r.setDragCue({ active: !!zone, cancel: zone === 'cancel' });
+    }
+
+    _buzz(ms) {
+      const a = this.app && this.app.audio;
+      if (a && typeof a.vibrate === 'function') a.vibrate(ms, 0);   // off when vibration is off in Settings
+    }
+
+    // "Cancelled" in the tray for a moment, with a soft sound: the drag was let go outside the playfield
+    _flashCancelled() {
+      const e = this.el;
+      e.trayCue.textContent = CANCELLED_TEXT;
+      e.hudTray.classList.remove('is-cancelled');
+      void e.hudTray.offsetWidth;   // restart the animation
+      e.hudTray.classList.add('is-cancelled');
+      clearTimeout(this._cancelledTimer);
+      this._cancelledTimer = setTimeout(() => this._endCancelled(), CANCELLED_MS);
+      this._sfx('cancel');
+    }
+
+    _endCancelled() {
+      clearTimeout(this._cancelledTimer);
+      this._cancelledTimer = 0;
+      this.el.hudTray.classList.remove('is-cancelled');
     }
 
     // First-time "new block" toasts; a type counts as seen once its toast is actually shown
@@ -584,7 +681,8 @@
     onLayout() {
       this._dirtyPreviews = true;
       const top = this.top();
-      if (top && (top.name === 'blocks' || top.name === 'howto' || top.name === 'odds')) this._drawPreviews(top.el);
+      if (top && (top.name === 'blocks' || top.name === 'howto' || top.name === 'odds' || top.name === 'explore')) this._drawPreviews(top.el);
+      if (top && top.name === 'blockinfo') this._drawInfo();
       // Toasts: compact on short playfields, and kept above the portrait odds chip
       const st = this.el.stage.getBoundingClientRect(), chip = this.el.oddsChip.getBoundingClientRect();
       this._stageH = st.height;
@@ -714,6 +812,7 @@
       if (top) top.el.hidden = true;
       this.stack.push({ name, el: screen, from: document.activeElement });
       screen.hidden = false;
+      if (PLAY_PANELS.has(name) && this._toasts.length) this._dismissToasts();
       const panel = screen.querySelector('.panel');
       if (panel) panel.scrollTop = 0;
       this._prepare(name);
@@ -790,6 +889,8 @@
         case 'settings': this.syncSettings(); break;
         case 'pause': this._prepPause(); break;
         case 'odds': this._syncOdds(); this._drawPreviews(this.screens.odds); break;
+        case 'explore': this._syncOdds(); this._drawPreviews(this.screens.explore); break;
+        case 'blockinfo': this._prepInfo(); break;
         default: break;
       }
     }
@@ -983,10 +1084,12 @@
       this._syncTypes();
     }
 
-    // ---- block odds (portrait chip, wide sidebar, pause menu, odds panel) ----------------------
-    // Every [data-odds] node in index.html, plus the panel rows built here, is filled by _syncOdds.
+    // ---- block odds (portrait chip, wide sidebar, pause menu, odds panel, explorer) --------------
+    // Every [data-odds] node in index.html, plus the odds panel and explorer rows built here, is
+    // filled by _syncOdds.
     _buildOdds() {
-      const rows = [];
+      this._exploreRows = this._buildExplorer();
+      const rows = this._exploreRows.slice();
       // Two columns on wide panels: summary + good blocks | bad blocks (stacked when narrow)
       const groups = [
         { cat: 'positive', title: 'Good blocks', keys: TT.POSITIVE_KEYS, total: 'pos', box: this.root.querySelector('#odds-col-good') },
@@ -1036,8 +1139,7 @@
       const d = this.oddsEl;
       const pos = fmtPct(o.pos), neg = fmtPct(o.neg), normal = fmtPct(o.normal);
       // Per type: its share, 'off' (switched off in Special Blocks) or not unlocked yet
-      const rowText = d.rows.map((r) => (o.types[r.key] != null ? fmtPct(o.types[r.key])
-        : !enabled.has(r.key) ? 'off' : 'unlocks at ' + TT.BLOCK_TYPES[r.key].unlock + ' m'));
+      const rowText = d.rows.map((r) => typeOddsText(o, enabled, r.key));
       const sig = [pos, neg, normal, o.next ? o.next.key + '@' + o.next.unlock : ''].concat(rowText).join('|');
       if (sig === this._oddsSig) return;
       this._oddsSig = sig;
@@ -1060,7 +1162,7 @@
       let anyOff = false;
       d.rows.forEach((r, i) => {
         const text = rowText[i];
-        const state = text === 'off' ? 'off' : o.types[r.key] != null ? 'on' : 'locked';
+        const state = typeState(o, enabled, r.key);
         if (state === 'off') anyOff = true;
         if (r.text !== text) { r.val.textContent = text; r.text = text; }
         if (r.state !== state) {
@@ -1070,6 +1172,127 @@
         }
       });
       d.foot.hidden = !anyOff;
+    }
+
+    // ---- special-block explorer ("?" button) and block cards ("?" badge on a block) ------------
+    // Good then bad blocks, each in unlock order: preview, name, rule, unlock height and the odds
+    // (kept up to date by _syncOdds). A row opens that block's card.
+    _buildExplorer() {
+      const rows = [];
+      const box = this.el.exploreBody;
+      if (!box) return rows;
+      box.textContent = '';
+      for (const gr of [
+        { cat: 'positive', title: 'Good blocks', keys: TT.POSITIVE_KEYS, total: 'pos' },
+        { cat: 'negative', title: 'Bad blocks', keys: TT.NEGATIVE_KEYS, total: 'neg' }
+      ]) {
+        const sec = make('section', 'odds-group explore-group group-' + gr.cat);
+        const h3 = make('h3', '', gr.title);
+        const total = make('b');
+        total.dataset.odds = gr.total;
+        h3.appendChild(total);
+        const list = make('ul', 'explore-list');
+        for (const key of byUnlock(gr.keys)) {
+          const type = TT.BLOCK_TYPES[key];
+          const btn = make('button', 'explore-row ' + categoryClass(type));
+          btn.type = 'button';
+          btn.dataset.action = 'explore-row';
+          btn.dataset.key = key;
+          const cv = make('canvas', 'explore-canvas');
+          cv.dataset.preview = key;
+          cv.dataset.cell = String(EXPLORE_PREVIEW_CELL);
+          const val = make('span', 'explore-val');
+          const head = make('span', 'explore-head');
+          head.append(make('span', 'explore-name', type.name), val);
+          const text = make('span', 'explore-text');
+          text.append(head, make('span', 'explore-desc', type.desc), make('span', 'explore-unlock', unlockLabel(type)));
+          btn.append(cv, text);
+          const li = make('li');
+          li.appendChild(btn);
+          list.appendChild(li);
+          rows.push({ key, li: btn, val, text: null, state: null });
+        }
+        sec.append(h3, list);
+        box.appendChild(sec);
+      }
+      return rows;
+    }
+
+    // Which block the next card shows (main.js showBlockInfo). spec: the dealt block, else a sample
+    setBlockInfo(key, spec) {
+      if (!isSpecial(key)) return false;
+      this._info = { key, spec: spec && spec.typeKey === key ? spec : sampleSpec(key) };
+      return true;
+    }
+
+    _prepInfo() {
+      const info = this._info, n = this.el.info;
+      if (!info) return;
+      const type = TT.BLOCK_TYPES[info.key];
+      const { o, enabled } = this._currentOdds();
+      const state = typeState(o, enabled, info.key);
+      n.panel.classList.remove('cat-positive', 'cat-negative');
+      n.panel.classList.add(categoryClass(type));
+      n.cat.textContent = CATEGORY_TEXT[type.category];
+      n.name.textContent = type.name;
+      n.desc.textContent = type.desc;
+      n.unlock.textContent = type.unlock > 0 ? 'From ' + type.unlock + ' m' : 'From the start';
+      n.odds.textContent = typeOddsText(o, enabled, info.key);
+      n.odds.classList.toggle('is-dim', state !== 'on');
+      n.note.textContent = state === 'on' ? 'The chance that a block dealt at your best height is ' + type.name + '.'
+        : state === 'off' ? 'Switched off for this run under Special Blocks.'
+          : 'It starts to appear once your best height reaches ' + type.unlock + ' m.';
+      n.all.hidden = this._below('explore');   // opened from the list: Close goes back to it
+      this._drawInfo();
+    }
+
+    _drawInfo() {
+      if (this._info) drawPreview(this.el.info.canvas, this._info.spec, { cell: INFO_PREVIEW_CELL });
+    }
+
+    // A screen of that name is open under the top one
+    _below(name) {
+      return this.stack.slice(0, -1).some((s) => s.name === name);
+    }
+
+    // The "?" badge on a block in the tray: that block's card. A second finger while a block is
+    // being dragged is ignored, like everywhere else.
+    _slotInfo(t) {
+      const g = this.game, input = this.app.input;
+      if (!g || (input && typeof input.isPressing === 'function' && input.isPressing())) return;
+      const b = g.batch[Number(t.dataset.help)];
+      if (b && !b.used) this.app.showBlockInfo(b.spec.typeKey, b.spec);
+    }
+
+    // The full list. From a card it takes the card's place with that block marked (or, when the
+    // card was opened from the list, goes back to it).
+    _explore() {
+      const top = this.top();
+      if (top && top.name === 'blockinfo') {
+        if (this._below('explore')) { this.back(); return; }
+        const key = this._info ? this._info.key : null;
+        this.stack.pop();
+        top.el.hidden = true;
+        this.show('explore');
+        this._markRow(key, true);
+        return;
+      }
+      this._markRow(null);
+      this.app.showExplorer();
+    }
+
+    // A row of the explorer: its card on top (Close comes back here, with the row marked)
+    _rowInfo(key) {
+      this._markRow(key);
+      this.app.showBlockInfo(key);
+    }
+
+    _markRow(key, reveal) {
+      for (const r of this._exploreRows) {
+        const on = r.key === key;
+        r.li.classList.toggle('is-current', on);
+        if (on && reveal && typeof r.li.scrollIntoView === 'function') r.li.scrollIntoView({ block: 'center' });
+      }
     }
 
     // ---- events ---------------------------------------------------------------------------
@@ -1129,6 +1352,9 @@
         case 'daily': app.startGame({ seed: TT.RNG.dailySeed() }); break;
         case 'open': this.show(t.dataset.target); break;
         case 'odds': app.showOdds(); break;
+        case 'explore': this._explore(); break;
+        case 'explore-row': this._rowInfo(t.dataset.key); break;
+        case 'block-info': this._slotInfo(t); break;
         case 'back': this.back(); break;
         case 'seed-random': this.el.seedInput.value = TT.RNG.randomSeed(); this._seedHint(); break;
         case 'resume': app.resume(); break;
@@ -1202,8 +1428,10 @@
         return;
       }
       if (isTyping(ev.target) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
-      // P toggles pause and O the odds panel, from the menus they belong to as well
-      if ((ev.key === 'p' || ev.key === 'P') && (top.name === 'pause' || top.name === 'odds')) {
+      // P toggles pause, O the odds panel and ? / H the special-block explorer, from the menus they
+      // belong to as well (the explorer and a block's card pause the game like the odds panel)
+      const inPlay = top.name === 'pause' || top.name === 'odds' || top.name === 'explore' || top.name === 'blockinfo';
+      if ((ev.key === 'p' || ev.key === 'P') && inPlay) {
         ev.preventDefault();
         if (!ev.repeat) this.app.resume();
         return;
@@ -1211,6 +1439,11 @@
       if ((ev.key === 'o' || ev.key === 'O') && (top.name === 'pause' || top.name === 'odds')) {
         ev.preventDefault();
         if (!ev.repeat) { if (top.name === 'odds') this.back(); else this.app.showOdds(); }
+        return;
+      }
+      if ((ev.key === '?' || ev.key === 'h' || ev.key === 'H') && inPlay) {
+        ev.preventDefault();
+        if (!ev.repeat) { if (top.name === 'explore') this.back(); else this._explore(); }
         return;
       }
       if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {

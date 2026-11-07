@@ -1,11 +1,11 @@
 /* TeTrowers — special block behaviours (docs/ARCHITECTURE.md §3 and §5).
  *
  * A handler table keyed by typeKey plus the dispatchers game.js calls. Everything runs
- * with the world UNLOCKED (after world.step), so handlers may create, destroy, shatter,
- * freeze and weld directly. An earlier record of the same batch may already have
- * destroyed, shattered or frozen any block, so handlers always re-check `dead` and the
- * body type, and every handler is idempotent (game.js calls onFirstTouch AND onContact
- * with the same record).
+ * with the world UNLOCKED (after world.step), so handlers may destroy, freeze and weld
+ * directly. An earlier record of the same batch may already have destroyed or frozen any
+ * block, so handlers always re-check `dead` and the body type, and every handler is
+ * idempotent (game.js calls onFirstTouch AND onContact with the same record).
+ * Nothing here ever creates a block: every block in play is a tetromino the player dropped.
  *
  * Per-block state lives in block.fx (the renderer reads it):
  *   vine      welds: [{x, y, partner, joint}] local anchors, pruned once the partner is gone
@@ -202,16 +202,13 @@
     }
   }
 
-  // Shatter into rubble, emit + count. Returns the number of parts (0 if nothing happened).
-  // Rubble continues a fall in progress (game.js fallTurn / fallMoved: whose turn a loss costs).
-  function shatterBlock(game, block, cause) {
+  // Destroy a block smashed by an anvil or a breaking glass block. Not a loss (no life).
+  // 'shatter' goes out first: the renderer and audio need the block's look and place.
+  function breakBlock(game, block, cause, reason) {
     const c = centroid(block);
-    const parts = game.physics.shatter(block);
-    if (!parts.length || parts[0] === block) return 0;
-    if (block.fallTurn != null) for (const p of parts) { p.fallTurn = block.fallTurn; p.fallMoved = block.fallMoved; }
-    emit(game, 'shatter', { x: c.x, y: c.y, count: parts.length, cause });
+    emit(game, 'shatter', { x: c.x, y: c.y, count: 1, cause, block });
+    game.physics.removeBlock(block, reason);
     bump(game, 'shattered');
-    return parts.length;
   }
 
   // ---- Mine ---------------------------------------------------------------------------
@@ -232,17 +229,17 @@
   }
 
   // ---- Anvil --------------------------------------------------------------------------
-  // Shatter `other` if it is a dynamic multi-cell block below the anvil. Mines detonate,
+  // Smash (destroy) `other` if it is a dynamic block below the anvil. Mines detonate,
   // spikes pop the anvil and armed glass breaks by itself instead (their own handlers see
-  // the anvil above them); single cells cannot break further.
+  // the anvil above them); other anvils and static blocks are immune.
   function smash(game, anvil, other, ny) {
     if (!other || other.isPlatform || other.dead || anvil.dead) return;
     const k = other.typeKey;
-    if (k === 'mine' || k === 'anvil' || k === 'spikes' || (k === 'glass' && other.fx.armed) || other.cells.length <= 1) return;
+    if (k === 'mine' || k === 'anvil' || k === 'spikes' || (k === 'glass' && other.fx.armed)) return;
     if (!other.body.isDynamic()) return;
     const below = ny != null ? ny < -ANVIL_HIT_NY
       : centroid(other).y < game.physics.bounds(anvil).minY + CENTROID_FALLBACK;
-    if (below) shatterBlock(game, other, 'anvil');
+    if (below) breakBlock(game, other, 'anvil', 'smashed');
   }
 
   function impactActive(game, anvil) {
@@ -488,10 +485,6 @@
       }
     },
 
-    crumble: {
-      firstTouch(game, block) { shatterBlock(game, block, 'crumble'); }
-    },
-
     magnet: {
       settle(game, magnet) {
         const fx = magnet.fx;
@@ -529,8 +522,9 @@
       canPetrify: (game, mine) => !mine.fx.lit
     },
 
-    // Breaks into rubble (keeping its look) the first time a block lands on it once armed.
-    // Static (frozen / petrified) glass is immune: physics.shatter refuses static bodies.
+    // Shatters away the first time a dynamic block lands on it once armed: the glass is
+    // destroyed and whatever rested on it falls into the gap. Static (frozen / petrified)
+    // glass is immune.
     glass: {
       settle(game, glass) {
         const fx = glass.fx;
@@ -541,9 +535,10 @@
       },
       contact(game, glass, other, rec, selfIsA) {
         const fx = glass.fx;
-        if (!fx.armed || rec.sensor || other.isPlatform || other.dead || !other.body.isDynamic()) return;
+        if (!fx.armed || glass.dead || !glass.body.isDynamic()) return;
+        if (rec.sensor || other.isPlatform || other.dead || !other.body.isDynamic()) return;
         if (fx.ignoreIds.has(other.id) || !onTop(game, glass, other, rec, selfIsA, ON_TOP_NY)) return;
-        shatterBlock(game, glass, 'glass');
+        breakBlock(game, glass, 'glass', 'shattered');
       }
     },
 
@@ -676,7 +671,7 @@
   function update(game, dt) {
     const r = registry(game.physics);
     const fuses = r.fuses, magnets = r.magnets, vines = r.vines;
-    // A weld dies with its partner (shattered, popped, swallowed, melted, lost...): drop its
+    // A weld dies with its partner (smashed, popped, swallowed, melted, lost...): drop its
     // anchor so the vine stops drawing it. Blocks only die when physics.version changes.
     if (vines.size && r.weldsVersion !== game.physics.version) {
       r.weldsVersion = game.physics.version;
