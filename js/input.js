@@ -1,21 +1,26 @@
-/* TeTrowers — keyboard and pointer input (TT.Input).
+/* TeTrowers — keyboard, mouse and touch input (TT.Input).
  *
- * Keyboard (window): Left/Right move with our own repeat (the OS auto-repeat is ignored),
- * Up next block, Down/Space drop, Ctrl tapped on its own (not as part of a shortcut) cycles the
- * placement mode, Esc/P pause, O block odds, M mute, 1-3 pick a slot. Pointer on the canvas
- * (touch + mouse): a horizontal drag moves the piece relative to where it was when the drag began
- * (1:1 in world space), a quick downward swipe drops, plain taps do nothing.
+ * Keyboard (window): Left/Right move with our own repeat (the OS auto-repeat is ignored), Down picks
+ * the next block and Up the previous one (once per press), Space/Enter drop, Ctrl tapped on its own
+ * (not as part of a shortcut) cycles the placement mode, Esc/P pause, O block odds, M mute, 1-3 pick
+ * a slot. Space and Enter on a control the player reached with the keyboard press that control.
+ * Pointer (mouse, touch and pen behave the same): dragging a block out of the tray picks it up; over
+ * the playfield the hovering piece follows the pointer, and letting go there drops it. Dragged back
+ * over the tray (or let go anywhere else) nothing drops and the piece is back where it was picked up.
+ * Let go before the drop is allowed, the drop waits until it is (any new drag, selection, key move,
+ * pause or menu cancels it). A tap on a slot only selects it; a drag that starts on the playfield
+ * only moves the piece and never drops it.
  * Game keys are captured (preventDefault) only while a game is live and no menu covers it.
- * update(dt) is called once per frame by the main loop for hold / repeat timing.
+ * update(dt) is called once per frame by the main loop: hold / repeat timing, the latest pointer
+ * position (moves are coalesced to one aim per frame) and the waiting drop. `cue` tells ui.js what
+ * to show: the lifted slot, where the drag is ('field' | 'cancel') and whether a drop is waiting.
  */
 (function (TT) {
   'use strict';
   const C = TT.CONFIG;
   const { clamp } = TT.Util;
 
-  const SWIPE_MIN_PX = (C.SWIPE_MIN_PX != null ? C.SWIPE_MIN_PX : 60);     // downward travel of a drop swipe
-  const SWIPE_MAX_MS = (C.SWIPE_MAX_MS != null ? C.SWIPE_MAX_MS : 350);    // ...completed within this time
-  const DRAG_START_PX = (C.DRAG_START_PX != null ? C.DRAG_START_PX : 8);   // travel before a gesture picks its axis
+  const DRAG_START_PX = (C.DRAG_START_PX != null ? C.DRAG_START_PX : 8);   // pointer travel that makes a press a drag
   const MAX_REPEATS_PER_FRAME = 3;
 
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -24,8 +29,9 @@
     switch (e.key) {
       case 'ArrowLeft': case 'Left': return 'left';
       case 'ArrowRight': case 'Right': return 'right';
-      case 'ArrowUp': case 'Up': return 'next';
-      case 'ArrowDown': case 'Down': case ' ': case 'Spacebar': return 'drop';
+      case 'ArrowDown': case 'Down': return 'next';
+      case 'ArrowUp': case 'Up': return 'prev';
+      case ' ': case 'Spacebar': case 'Enter': return 'drop';
       case 'Control': return 'mode';
       case 'Escape': case 'Esc': case 'p': case 'P': return 'pause';
       case 'o': case 'O': return 'odds';
@@ -34,7 +40,7 @@
     }
     // Digits by physical key so AZERTY and the numpad work too
     switch (e.code) {
-      case 'Space': return 'drop';
+      case 'Space': case 'NumpadEnter': return 'drop';
       case 'Digit1': case 'Numpad1': return 'slot0';
       case 'Digit2': case 'Numpad2': return 'slot1';
       case 'Digit3': case 'Numpad3': return 'slot2';
@@ -45,7 +51,7 @@
   }
 
   // Actions that still work while Ctrl is held (Ctrl+P, Ctrl+1, ... belong to the browser)
-  const CTRL_OK = new Set(['left', 'right', 'next', 'drop', 'mode']);
+  const CTRL_OK = new Set(['left', 'right', 'next', 'prev', 'drop', 'mode']);
 
   function isTyping(t) {
     return !!t && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' ||
@@ -53,19 +59,52 @@
   }
 
   function isControl(t) {
-    return !!t && (t.tagName === 'BUTTON' || t.tagName === 'A' || t.tagName === 'INPUT' || t.getAttribute('role') === 'button');
+    return !!t && (t.tagName === 'BUTTON' || t.tagName === 'A' || t.tagName === 'INPUT' ||
+      (typeof t.getAttribute === 'function' && t.getAttribute('role') === 'button'));
+  }
+
+  // A control the player reached with the keyboard (it shows the focus ring): Space and Enter press
+  // it. A control left focused by a mouse or touch press does not keep the keys from the game.
+  function keyboardFocused(t) {
+    if (!isControl(t)) return false;
+    try { return t.matches(':focus-visible'); } catch (err) { return true; } // no :focus-visible: play safe
+  }
+
+  function blurActive() {
+    const a = typeof document !== 'undefined' ? document.activeElement : null;
+    if (a && a !== document.body && typeof a.blur === 'function') a.blur();
+  }
+
+  function slotButton(t) {
+    return t && typeof t.closest === 'function' ? t.closest('[data-slot]') : null;
+  }
+
+  // The previous unused slot, wrapping (the counterpart of game.selectNext)
+  function selectPrev(game) {
+    const b = game.batch, n = b.length;
+    const from = game.selected < 0 ? 0 : game.selected;
+    for (let k = 1; k < n; k++) {
+      const i = (from - k + n) % n;
+      if (!b[i].used) return game.selectSlot(i);
+    }
+    return false;
   }
 
   class Input {
-    // opts: { canvas, getGame(), getRenderer(), isBlocked() -> bool (a menu is open),
+    // opts: { canvas, tray (the batch tray; its [data-slot] buttons are dragged onto the playfield),
+    //         getGame(), getRenderer(), isBlocked() -> bool (a menu is open),
     //         onPause(), onOdds(), onMute(), onActivity() }
     constructor(opts) {
       this.opts = opts || {};
       this.canvas = this.opts.canvas || null;
+      this.tray = this.opts.tray || null;
       this.held = [];          // held arrow keys, most recent last: { code, dir, t0, next, mode }
-      this.ptr = null;         // active pointer gesture
+      this.ptr = null;         // the press in progress, on a tray slot ('tray') or the playfield ('canvas')
+      this.queued = null;      // a drop let go before it was allowed: { game, piece }
+      this.cue = { slot: -1, zone: '', queued: false };   // read by ui.js every frame
       this.ctrl = null;        // Ctrl is down: { chord } (chord: something else happened meanwhile)
       this.lastInput = 0;
+      this._pt = { x: 0, y: 0 };
       this._handlers = [];
 
       const chord = () => { if (this.ctrl) this.ctrl.chord = true; };
@@ -75,14 +114,25 @@
       this._listen(window, 'wheel', chord, { passive: true });     // Ctrl+wheel zoom
       this._listen(window, 'blur', () => this.releaseAll());
       this._listen(document, 'visibilitychange', () => { if (document.hidden) this.releaseAll(); });
+      // A press is followed on window: a block dragged out of the tray travels over the whole page
+      this._listen(window, 'pointermove', (e) => this._pointerMove(e), { passive: true });
+      this._listen(window, 'pointerup', (e) => this._pointerUp(e, false));
+      this._listen(window, 'pointercancel', (e) => this._pointerUp(e, true));
+      const lost = (e) => {
+        const p = this.ptr;
+        if (p && e.pointerId === p.id && e.target === p.el) this._endPress();
+      };
       if (this.canvas) {
-        this.canvas.style.touchAction = 'none';
-        this._listen(this.canvas, 'pointerdown', (e) => this._pointerDown(e));
-        this._listen(this.canvas, 'pointermove', (e) => this._pointerMove(e));
-        this._listen(this.canvas, 'pointerup', (e) => this._pointerUp(e, false));
-        this._listen(this.canvas, 'pointercancel', (e) => this._pointerUp(e, true));
-        this._listen(this.canvas, 'lostpointercapture', (e) => { if (this.ptr && e.pointerId === this.ptr.id) this.ptr = null; });
-        this._listen(this.canvas, 'contextmenu', (e) => e.preventDefault());
+        const c = this.canvas;
+        c.style.touchAction = 'none';
+        this._listen(c, 'pointerdown', (e) => this._pointerDown(e, 'canvas'));
+        this._listen(c, 'lostpointercapture', lost);
+        this._listen(c, 'contextmenu', (e) => e.preventDefault());   // no long-press menu mid-drag
+      }
+      if (this.tray) {
+        this._listen(this.tray, 'pointerdown', (e) => this._pointerDown(e, 'tray'));
+        this._listen(this.tray, 'lostpointercapture', lost);
+        this._listen(this.tray, 'contextmenu', (e) => { if (slotButton(e.target)) e.preventDefault(); });
       }
     }
 
@@ -97,22 +147,21 @@
       this._handlers = [];
     }
 
-    // True while keys are held or a pointer gesture is in progress (keeps the loop at full rate)
-    isActive() { return this.held.length > 0 || !!this.ptr; }
+    // True while keys are held, a pointer gesture is in progress or a drop waits (full frame rate)
+    isActive() { return this.held.length > 0 || !!this.ptr || !!this.queued; }
 
     releaseAll() {
       this.held.length = 0;
       this.ctrl = null;
-      if (this.ptr) {
-        const id = this.ptr.id;
-        this.ptr = null;
-        try { this.canvas.releasePointerCapture(id); } catch (err) { /* already released */ }
-      }
+      this._cancelQueued();
+      if (this.ptr) this._endPress();
     }
 
     reset() { this.releaseAll(); }
 
     _game() { return this.opts.getGame ? this.opts.getGame() : null; }
+
+    _renderer() { return this.opts.getRenderer ? this.opts.getRenderer() : null; }
 
     _live(game) {
       return !!game && game.state === 'playing' && !game.ending && !(this.opts.isBlocked && this.opts.isBlocked());
@@ -132,8 +181,8 @@
       if (e.defaultPrevented || e.altKey || e.metaKey || isTyping(e.target)) return;
       const action = keyAction(e);
       if (!action || (e.ctrlKey && !CTRL_OK.has(action))) return;
-      // Space on a button the player tabbed to presses that button, it does not drop
-      if (action === 'drop' && e.key !== 'ArrowDown' && e.key !== 'Down' && isControl(e.target)) return;
+      // Space / Enter on a button the player tabbed to press that button
+      if (action === 'drop' && keyboardFocused(e.target)) return;
       const game = this._game();
       const live = this._live(game);
       if (action === 'mute') {
@@ -144,12 +193,14 @@
       if (!live) return;
       e.preventDefault();
       if (action === 'left' || action === 'right') {
+        this._cancelQueued();
         this._press(e, action === 'left' ? -1 : 1, game);
         return;
       }
-      if (e.repeat) return;
+      if (e.repeat) return;   // one block switch or drop per press
       switch (action) {
-        case 'next': game.selectNext(); break;
+        case 'next': this._cancelQueued(); game.selectNext(); break;
+        case 'prev': this._cancelQueued(); selectPrev(game); break;
         case 'drop': game.drop(); break;
         case 'mode': if (!this.ctrl) this.ctrl = { chord: false }; break; // cycles on release (_keyUp)
         case 'pause':
@@ -160,7 +211,7 @@
           this.releaseAll();
           if (this.opts.onOdds) this.opts.onOdds();
           break;
-        default: game.selectSlot(Number(action.slice(4))); break;
+        default: this._cancelQueued(); game.selectSlot(Number(action.slice(4))); break;
       }
     }
 
@@ -195,6 +246,13 @@
     }
 
     update(dt) {
+      this._updateQueued();
+      const p = this.ptr;
+      if (p) {
+        const g = this._game();
+        if (!this._live(g)) this._endPress();
+        else if (p.dirty) { p.dirty = false; this._aim(g, p); }
+      }
       const h = this.held.length ? this.held[this.held.length - 1] : null;
       if (!h) return;
       const game = this._game();
@@ -225,59 +283,191 @@
       }
     }
 
+    // ---- waiting drop -----------------------------------------------------------------
+    // Fires once the game allows the drop, as long as the same piece is still the one in hand
+    _updateQueued() {
+      const q = this.queued;
+      if (!q) return;
+      const g = this._game();
+      if (g !== q.game || g.piece !== q.piece || !this._live(g)) { this._cancelQueued(); return; }
+      if (!g.canDrop) return;
+      this._cancelQueued();
+      g.drop();
+    }
+
+    _cancelQueued() {
+      this.queued = null;
+      this.cue.queued = false;
+    }
+
     // ---- pointer ----------------------------------------------------------------------
-    _pointerDown(e) {
+    // src: 'tray' (a press on the tray, used only on a slot) or 'canvas' (on the playfield)
+    _pointerDown(e, src) {
       this._activity();
-      if (this.ptr || (e.pointerType === 'mouse' && e.button !== 0)) return;
       const game = this._game();
       if (!this._live(game)) return;
-      e.preventDefault();
+      let el = this.canvas, slot = -1;
+      if (src === 'canvas') {
+        e.preventDefault();
+        blurActive(); // the keys go back to the game, not to a button clicked earlier
+      } else {
+        el = slotButton(e.target);
+        if (!el) return;
+        slot = Number(el.dataset.slot);
+      }
+      if (this.ptr && this.ptr.id === e.pointerId) this._endPress(); // its release never reached us
+      if (this.ptr || e.button !== 0) return;                         // extra fingers are ignored
       const piece = game.piece;
-      this.ptr = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: now(), axis: null, piece, pieceX: piece ? piece.x : 0 };
-      try { this.canvas.setPointerCapture(e.pointerId); } catch (err) { /* moves still arrive over the canvas */ }
+      // out: a block lifted from the tray was aimed over the playfield (homeX: where it was picked up);
+      // done: it was let go there (dropped or waiting)
+      const p = this.ptr = {
+        id: e.pointerId, src, el, slot, mouse: e.pointerType === 'mouse',
+        path: 0, drag: false, dead: false, dirty: false, out: false, done: false, homeX: 0,
+        x: e.clientX, y: e.clientY, x0: e.clientX, piece, pieceX: piece ? piece.x : 0
+      };
+      try { el.setPointerCapture(e.pointerId); } catch (err) { /* moves still arrive on window */ }
+      if (src === 'tray') {
+        // A press on a block is a new selection: it cancels a waiting drop and picks the block
+        // at once (a tap ends there); a used or empty slot gives a press that does nothing
+        this._cancelQueued();
+        p.dead = !this._hold(game, p);
+      }
     }
 
     _pointerMove(e) {
       const p = this.ptr;
       if (!p || e.pointerId !== p.id) return;
+      if (p.mouse && e.buttons === 0) { this._endPress(); return; } // released where we could not see it
+      this._activity();
+      this._track(p, e.clientX, e.clientY);
+    }
+
+    _pointerUp(e, cancelled) {
+      const p = this.ptr;
+      if (!p || e.pointerId !== p.id) return;
       this._activity();
       const game = this._game();
-      if (!this._live(game)) return;
-      const dx = e.clientX - p.x0, dy = e.clientY - p.y0;
-      if (!p.axis) {
-        if (Math.abs(dx) < DRAG_START_PX && Math.abs(dy) < DRAG_START_PX) return;
-        p.axis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
+      if (!cancelled && this._live(game)) {
+        this._track(p, e.clientX, e.clientY);
+        if (p.drag && !p.dead) {
+          if (p.src === 'canvas') this._aimRelative(game, p);
+          // Only a block brought out of the tray and let go over the playfield drops
+          else if (this._zone(p.x, p.y) === 'field' && this._hold(game, p)) {
+            this._aimAt(game, p.x, p.y);
+            p.done = true;
+            if (game.canDrop) game.drop();
+            else if (game.piece) { this.queued = { game, piece: game.piece }; this.cue.queued = true; }
+          }
+        }
       }
-      // A slow vertical gesture is no longer a swipe: let it steer
-      if (p.axis === 'y' && Math.abs(dx) >= DRAG_START_PX && now() - p.t0 > SWIPE_MAX_MS) p.axis = 'x';
-      if (p.axis !== 'x') return;
+      this._endPress();
+    }
+
+    // A block lifted out of the tray that does not drop goes back to where it was picked up
+    _endPress() {
+      const p = this.ptr;
+      this.ptr = null;
+      this.cue.slot = -1;
+      this.cue.zone = '';
+      if (!p) return;
+      if (p.out && !p.done) {
+        const g = this._game();
+        if (this._live(g)) this._putBack(g, p);
+      }
+      if (p.el) {
+        try { p.el.releasePointerCapture(p.id); } catch (err) { /* already released */ }
+      }
+    }
+
+    // Path length, not displacement: a drag that wiggles back to where it began is still a drag
+    _track(p, x, y) {
+      const dx = x - p.x, dy = y - p.y;
+      p.x = x;
+      p.y = y;
+      p.path += Math.sqrt(dx * dx + dy * dy);
+      p.dirty = true;
+      if (!p.drag && p.path >= DRAG_START_PX) this._startDrag(p);
+    }
+
+    _startDrag(p) {
+      p.drag = true;
+      this._cancelQueued();   // a new drag replaces a waiting drop
+      if (p.src !== 'tray' || p.dead) return;
+      const game = this._game();
+      if (!this._live(game) || !this._hold(game, p)) { p.dead = true; return; }
+      this.cue.slot = p.slot;   // the block is lifted out of its slot
+      this.cue.zone = this._zone(p.x, p.y) === 'field' ? 'field' : 'cancel';
+      p.homeX = game.piece.x;
+    }
+
+    // The dragged block stays the selected one (a key or the game may have switched meanwhile)
+    _hold(game, p) {
+      if (game.selected === p.slot && game.piece) return true;
+      if (game.selectSlot(p.slot)) return true;
+      if (this.cue.slot === p.slot) { this.cue.slot = -1; this.cue.zone = ''; }
+      return false;
+    }
+
+    // Once per frame with the latest position. A block out of the tray follows the pointer while it
+    // is over the playfield and is back at its pick-up spot anywhere else (where letting go cancels);
+    // a drag that began on the playfield moves the piece relative to its start.
+    _aim(game, p) {
+      if (!p.drag || p.dead) return;
+      if (p.src === 'canvas') { this._aimRelative(game, p); return; }
+      const over = this._zone(p.x, p.y) === 'field';
+      this.cue.zone = over ? 'field' : 'cancel';
+      if (!over) { this._putBack(game, p); return; }
+      if (!this._hold(game, p)) { p.dead = true; return; }
+      p.out = true;
+      this._aimAt(game, p.x, p.y);
+    }
+
+    _putBack(game, p) {
+      if (!p.out) return;
+      p.out = false;
+      if (game.selected === p.slot) game.setTargetX(p.homeX);
+    }
+
+    // Piece centre under the pointer (only x: the piece stays on the hover line)
+    _aimAt(game, x, y) {
+      const r = this._renderer(), piece = game.piece;
+      if (!piece || !r || typeof r.screenToWorld !== 'function' || !this.canvas) return;
+      const rect = this.canvas.getBoundingClientRect();
+      game.setTargetX(r.screenToWorld(x - rect.left, y - rect.top, this._pt).x - piece.shape.w / 2);
+    }
+
+    _aimRelative(game, p) {
       const piece = game.piece;
       if (!piece) return;
       if (piece !== p.piece) {
         // A new piece appeared mid-drag: continue relative to it from here
         p.piece = piece;
         p.pieceX = piece.x;
-        p.x0 = e.clientX;
+        p.x0 = p.x;
         return;
       }
-      const r = this.opts.getRenderer ? this.opts.getRenderer() : null;
-      const scale = r && r.scale > 0 ? r.scale : 1 / (game.pixelSize || 1 / 40);
-      game.setTargetX(p.pieceX + dx / scale);
+      game.setTargetX(p.pieceX + (p.x - p.x0) / this._scale(game));
     }
 
-    _pointerUp(e, cancelled) {
-      const p = this.ptr;
-      if (!p || e.pointerId !== p.id) return;
-      this.ptr = null;
-      this._activity();
-      if (cancelled || p.axis === 'x') return;
-      const dx = e.clientX - p.x0, dy = e.clientY - p.y0;
-      const game = this._game();
-      if (dy > SWIPE_MIN_PX && Math.abs(dy) > 2 * Math.abs(dx) && now() - p.t0 < SWIPE_MAX_MS && this._live(game)) {
-        game.drop();
+    _scale(game) {
+      const r = this._renderer();
+      return r && r.scale > 0 ? r.scale : 1 / (game.pixelSize || 1 / 40);
+    }
+
+    // What is under the pointer: 'field' (the playfield itself), 'tray' or 'out' (HUD, sidebar
+    // top, outside the window, ...). Overlays that ignore the pointer (toasts, cues) are see-through.
+    _zone(x, y) {
+      const c = this.canvas;
+      if (!c) return 'out';
+      if (typeof document !== 'undefined' && typeof document.elementFromPoint === 'function') {
+        const hit = document.elementFromPoint(x, y);
+        if (hit === c) return 'field';
+        return hit && this.tray && this.tray.contains(hit) ? 'tray' : 'out';
       }
+      const r = c.getBoundingClientRect();
+      return x >= r.left && x < r.right && y >= r.top && y < r.bottom ? 'field' : 'out';
     }
   }
 
-  TT.Input = { Input, create: (opts) => new Input(opts), keyAction };
+  TT.Input = { Input, create: (opts) => new Input(opts), keyAction, selectPrev };
 })(typeof window !== 'undefined' ? (window.TT = window.TT || {}) : (global.TT = global.TT || {}));

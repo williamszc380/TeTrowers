@@ -7,7 +7,8 @@
  * closer than FRAME_MIN_MS are skipped, so a quiet tower costs almost nothing.
  * Optional modules (renderer, audio) are guarded: a failure there never breaks the page.
  * Phones: the system Back button / gesture closes the top screen or pauses (TT.UI.BackGuard)
- * instead of leaving, and a run that is hidden, killed or closed still has its best height saved.
+ * instead of leaving, a run that is hidden, killed or closed still has its best height saved, and
+ * the installed app stays upright (portrait lock, on top of the manifest's orientation).
  */
 (function (TT) {
   'use strict';
@@ -23,7 +24,7 @@
     settings: null, game: null, renderer: null, audio: null, input: null, ui: null,
     urlSeed: '', debug: false,
     startGame, restart, quitToMenu, pause, resume, togglePause, showOdds,
-    setSetting, setEnabledTypes, toggleMute, wake, sfx, navigated
+    setSetting, setEnabledTypes, toggleMute, wake, sfx, navigated, loadSettings, lockPortrait
   };
 
   // The special types of the first release. Settings saved without knownTypes knew only these,
@@ -62,6 +63,7 @@
     try { reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (err) { reduced = false; }
     return {
       mode: C.DEFAULT_MODE, sound: true, vibration: true, ghost: true, reducedMotion: reduced,
+      restartSameSeed: false,   // "Same seed" beside Restart / Play again: off = a new random seed
       enabledTypes: TT.SPECIAL_KEYS.slice()
     };
   }
@@ -71,7 +73,7 @@
     const saved = TT.Storage.read(TT.Storage.KEYS.settings, null);
     if (!saved || typeof saved !== 'object') return s;
     if (C.MODES.includes(saved.mode)) s.mode = saved.mode;
-    for (const k of ['sound', 'vibration', 'ghost', 'reducedMotion']) {
+    for (const k of ['sound', 'vibration', 'ghost', 'reducedMotion', 'restartSameSeed']) {
       if (typeof saved[k] === 'boolean') s[k] = saved[k];
     }
     if (Array.isArray(saved.enabledTypes)) {
@@ -86,11 +88,11 @@
     const s = App.settings;
     TT.Storage.write(TT.Storage.KEYS.settings, {
       mode: s.mode, sound: s.sound, vibration: s.vibration, ghost: s.ghost, reducedMotion: s.reducedMotion,
-      enabledTypes: s.enabledTypes.slice(), knownTypes: TT.SPECIAL_KEYS.slice()
+      restartSameSeed: s.restartSameSeed, enabledTypes: s.enabledTypes.slice(), knownTypes: TT.SPECIAL_KEYS.slice()
     });
   }
 
-  // key: 'mode' | 'sound' | 'vibration' | 'ghost' | 'reducedMotion'
+  // key: 'mode' | 'sound' | 'vibration' | 'ghost' | 'reducedMotion' | 'restartSameSeed'
   function setSetting(key, value) {
     const s = App.settings;
     if (!(key in s) || key === 'enabledTypes') return;
@@ -169,14 +171,21 @@
     if (App.audio && typeof App.audio.attach === 'function') safe('audio.attach', () => App.audio.attach(game));
     App.ui.closeAll();
     App.input.reset();
+    lockPortrait();
     wake();
     return game;
   }
 
-  function restart() {
+  // Restart / Play again: a new random seed, or the same one when "Same seed" is ticked
+  // (opts.sameSeed overrides the setting). The placement mode and block set carry over.
+  function restart(opts) {
     const g = App.game;
     if (!g) return startGame({});
-    return startGame({ seed: g.seed, mode: g.mode, enabledTypes: Array.from(g.enabledTypes || []) });
+    const o = opts || {};
+    const same = typeof o.sameSeed === 'boolean' ? o.sameSeed : !!App.settings.restartSameSeed;
+    let seed = g.seed;
+    for (let i = 0; !same && seed === g.seed && i < 8; i++) seed = TT.RNG.randomSeed();
+    return startGame({ seed, mode: g.mode, enabledTypes: Array.from(g.enabledTypes || []) });
   }
 
   function quitToMenu() {
@@ -297,6 +306,24 @@
     wake();
   }
 
+  // Installed on a phone or tablet (home-screen app), the game stays upright whatever the sensor
+  // says. Browsers only allow the lock there; anywhere else it is skipped or simply refused.
+  function lockPortrait() {
+    try {
+      const o = typeof screen !== 'undefined' ? screen.orientation : null;
+      const mm = typeof window !== 'undefined' ? window.matchMedia : null;
+      if (!o || typeof o.lock !== 'function' || typeof mm !== 'function') return false;
+      const app = ['standalone', 'fullscreen', 'minimal-ui'].some((m) => mm.call(window, '(display-mode: ' + m + ')').matches);
+      const touch = (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) || mm.call(window, '(any-pointer: coarse)').matches;
+      if (!app || !touch) return false;
+      const p = o.lock('portrait-primary');
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
   // ---- main loop ------------------------------------------------------------------------------
   function isIdle(now) {
     if (now - lastActivity < IDLE_AFTER * 1000) return false;
@@ -392,6 +419,7 @@
       pause();
       savePending();
     } else {
+      lockPortrait();   // the OS may have dropped the lock while the app was in the background
       wake();
     }
   }
@@ -420,6 +448,7 @@
     readUrlParams();
     App.settings = loadSettings();
     document.documentElement.classList.toggle('reduced-motion', !!App.settings.reducedMotion);
+    lockPortrait();
 
     const canvas = document.getElementById('game-canvas');
     if (typeof TT.Renderer === 'function') {
@@ -429,6 +458,7 @@
     App.ui = TT.UI.create(App);
     App.input = TT.Input.create({
       canvas,
+      tray: document.getElementById('hud-tray'),
       getGame: () => App.game,
       getRenderer: () => App.renderer,
       isBlocked: () => App.ui.isMenuOpen(),

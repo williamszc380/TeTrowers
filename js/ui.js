@@ -3,7 +3,9 @@
  * Created once by main.js (TT.UI.create(app)). Screens are the static <section data-screen>
  * elements of index.html, shown as a stack (title > settings, pause > how to play, ...).
  * The HUD reads the bound game's public fields once per frame and touches the DOM only when
- * a displayed value changed, so a running game costs a few comparisons per frame.
+ * a displayed value changed, so a running game costs a few comparisons per frame. The same goes
+ * for the drag cues (lifted slot, "Release to cancel" over the tray, "Dropping when ready" over
+ * the playfield), which mirror TT.Input's `cue`.
  * Also home of TT.Storage and the best-score / seen-type records: every localStorage access
  * is wrapped in try/catch with an in-memory fallback, so private browsing still works.
  */
@@ -23,8 +25,9 @@
   const PREVIEW_MAX_DPR = 2;
   const LIST_PREVIEW_CELL = 13; // CSS px per cell in the codex / toggle lists (tray slots fit a 4x4 piece)
   const ODDS_PREVIEW_CELL = 8;  // ...and in the odds panel rows
-  const PRESS_SEL = '[data-action="drop"], [data-action="slot"]';     // buttons that act on pointerdown
-  // ms the game-over buttons ignore presses (the player may still be hammering Space / Down)
+  const CUE_GAP = 8;            // CSS px between the hovering piece and the "Dropping when ready" cue
+  const DRAG_TIP = '#drag';     // Seen key of the one-time "how to drop" tip
+  // ms the game-over buttons ignore presses (the player may still be hammering Space / Enter)
   const OVER_GUARD_MS = (C.OVER_GUARD_MS != null ? C.OVER_GUARD_MS : 800);
   const GUARD = 'tetrowersGuard';   // history.state flag of the Back guard entry
   const GUARD_LEAVE_MS = 2000;      // our own history.back() must report back within this
@@ -36,7 +39,11 @@
   });
 
   const CATEGORY_TEXT = { positive: 'Good block', negative: 'Bad block', normal: 'Normal block' };
-  const GAME_ACTIONS = new Set(['mode', 'drop', 'slot']);
+  const GAME_ACTIONS = new Set(['mode', 'slot']);
+  const CUE_TEXT = {
+    field: 'Let go over the playfield to drop it · drag back here to cancel',
+    cancel: 'Release to cancel'
+  };
 
   // Preview shapes for types that do not force one (codex and toggle lists)
   const SAMPLE_SHAPES = {
@@ -318,6 +325,9 @@
       this._toastH = -1;        // height of the toast stack, -1 = measure again
       this._compact = false;    // short playfield: one compact toast at a time
       this._stageH = 0;
+      this._stageW = 0;
+      this._cueW = 0;           // measured size of the "Dropping when ready" cue (0 = measure again)
+      this._cueH = 0;
       this._chipClear = 0;      // px the portrait odds chip covers at the bottom of the playfield
       this._pt = { x: 0, y: 0 };
 
@@ -330,7 +340,7 @@
       this.el = {
         stage: q('#stage'), hudTop: q('#hud-top'), hudTray: q('#hud-tray'), toasts: q('#toasts'), oddsChip: q('#odds-chip'),
         lives: q('#hud-lives'), height: q('#hud-height'), best: q('#hud-best'), desc: q('#hud-desc'),
-        drop: q('#btn-drop'), ring: q('#btn-drop .ring-fg'),
+        trayCue: q('#tray-cue'), dropCue: q('#drop-cue'), dropCueBar: q('#drop-cue .cue-bar i'),
         modeBtns: Array.from(this.root.querySelectorAll('.hud [data-action="mode"]')),
         modeNames: Array.from(this.root.querySelectorAll('.hud .mode-name')),
         milestone: q('#hud-milestone'), seed: q('#hud-seed'),
@@ -341,7 +351,9 @@
         modeHint: q('#mode-hint'), vibrationHint: q('#vibration-hint'), pauseInfo: q('#pause-info'),
         overHeight: q('#over-height'), overBadge: q('#over-badge'), overTime: q('#over-time'),
         overDrops: q('#over-drops'), overLost: q('#over-lost'), overSeed: q('#over-seed'),
-        overPrev: q('#over-prev'), copyBtn: q('#btn-copy'), copyFallback: q('#copy-fallback')
+        overPrev: q('#over-prev'), copyBtn: q('#btn-copy'), copyFallback: q('#copy-fallback'),
+        sameSeed: Array.from(this.root.querySelectorAll('[data-setting="restartSameSeed"]')),
+        sameSeedVal: Array.from(this.root.querySelectorAll('[data-same-seed]'))
       };
       this.slots = Array.from(this.root.querySelectorAll('.slot')).map((btn) => ({
         btn,
@@ -373,9 +385,15 @@
       const seedEl = this.el.seed;
       seedEl.textContent = '';
       if (game) seedEl.append('Seed ', make('b', '', game.seed), ' · ' + rulesLabel(game.rules));
+      this._clearDragCues();
       // The previous run's toasts (and intros still waiting) go with it; warnings stay
       this._toastQueue.length = 0;
       for (const t of this._toasts.slice()) if (t._opts.kind !== 'warn') this._dropToast(t);
+      // Dragging is the only way to drop by touch or mouse: say so once
+      if (game && !Seen.has(DRAG_TIP)) {
+        Seen.add(DRAG_TIP);
+        this.toast({ id: 'drag-tip', title: 'Drag a block onto the playfield', text: 'Let go to drop it, or drag it back to the tray to cancel.', time: 7 });
+      }
     }
 
     update() {
@@ -426,15 +444,7 @@
         else d.textContent = descKey === '#end' ? 'The tower has fallen.' : 'Next blocks are on their way…';
       }
 
-      const ready = !!g.canDrop;
-      if (h.ready !== ready) {
-        e.drop.classList.toggle('is-ready', ready);
-        e.drop.setAttribute('aria-disabled', String(!ready));
-        if (ready && h.ready === false) this._flash(e.drop, 'is-pop');
-        h.ready = ready;
-      }
-      const prog = ready ? 1 : Math.round(clamp(g.readyProgress || 0, 0, 1) * 50) / 50;
-      if (h.prog !== prog) { e.ring.style.strokeDashoffset = String(100 - prog * 100); h.prog = prog; }
+      this._syncDrag(g);
 
       // game.odds is replaced whenever best height rises; the DOM changes only when a shown value does
       if (h.odds !== g.odds) { h.odds = g.odds; this._syncOdds(); }
@@ -479,6 +489,65 @@
       return ok;
     }
 
+    // ---- drag cues (state from TT.Input) ----------------------------------------------------
+    // The lifted slot; the tray reads "Release to cancel" while the drag is over it (or anywhere
+    // else that is not the playfield); "Dropping when ready" sits by the piece while a drop waits.
+    _syncDrag(g) {
+      const c = this.app && this.app.input ? this.app.input.cue : null;
+      const h = this.hud, e = this.el;
+      const lifted = c ? c.slot : -1, zone = (c && c.zone) || '', queued = !!(c && c.queued);
+      if (h.lifted !== lifted) {
+        for (let i = 0; i < this.slots.length; i++) this.slots[i].btn.classList.toggle('is-lifted', i === lifted);
+        h.lifted = lifted;
+      }
+      if (h.zone !== zone) {
+        e.hudTray.classList.toggle('is-dragging', zone === 'field');
+        e.hudTray.classList.toggle('is-cancel', zone === 'cancel');
+        this.root.classList.toggle('is-dragging', !!zone);
+        if (zone) e.trayCue.textContent = CUE_TEXT[zone] || '';
+        h.zone = zone;
+      }
+      if (h.queued !== queued) {
+        e.dropCue.hidden = !queued;
+        h.queued = queued;
+        h.cueX = NaN; h.cueY = NaN; h.cueP = NaN;
+        this._cueW = 0;
+      }
+      if (queued) this._placeDropCue(g);
+    }
+
+    // Centred above the hovering piece (below it when the piece is at the top of the playfield),
+    // with the drop readiness as a thin bar
+    _placeDropCue(g) {
+      const h = this.hud, e = this.el, box = e.dropCue;
+      if (!this._cueW) { this._cueW = box.offsetWidth; this._cueH = box.offsetHeight; }
+      const w = this._cueW, r = this.app.renderer, p = g.piece;
+      let x = this._stageW / 2, y = CUE_GAP;
+      if (r && p && p.shape && r.scale > 0 && typeof r.worldToScreen === 'function') {
+        const top = r.worldToScreen(p.x + p.shape.w / 2, p.y + p.shape.h, this._pt);
+        x = top.x;
+        y = top.y - CUE_GAP - this._cueH;
+        if (y < CUE_GAP) y = r.worldToScreen(0, p.y, this._pt).y + CUE_GAP;
+      }
+      x = Math.round(clamp(x - w / 2, 4, Math.max(4, this._stageW - w - 4)));
+      y = Math.round(y);
+      if (x !== h.cueX || y !== h.cueY) {
+        box.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+        h.cueX = x;
+        h.cueY = y;
+      }
+      const prog = Math.round(clamp(g.readyProgress || 0, 0, 1) * 50) / 50;
+      if (prog !== h.cueP) { e.dropCueBar.style.transform = 'scaleX(' + prog + ')'; h.cueP = prog; }
+    }
+
+    _clearDragCues() {
+      const e = this.el;
+      for (const s of this.slots) s.btn.classList.remove('is-lifted');
+      e.hudTray.classList.remove('is-dragging', 'is-cancel');
+      this.root.classList.remove('is-dragging');
+      e.dropCue.hidden = true;
+    }
+
     // First-time "new block" toasts; a type counts as seen once its toast is actually shown
     _introduce(batch) {
       if (!batch) return;
@@ -519,6 +588,8 @@
       // Toasts: compact on short playfields, and kept above the portrait odds chip
       const st = this.el.stage.getBoundingClientRect(), chip = this.el.oddsChip.getBoundingClientRect();
       this._stageH = st.height;
+      this._stageW = st.width;
+      this._cueW = 0;      // measure the drop cue again
       this._chipClear = chip.height > 0 ? Math.max(0, Math.round(st.bottom - chip.top)) : 0;
       this.el.toasts.style.setProperty('--chip-clear', this._chipClear + 'px');
       const compact = st.height > 0 && st.height < TOAST_COMPACT_H;
@@ -763,11 +834,20 @@
       const info = this.el.pauseInfo;
       info.textContent = '';
       if (!g) return;
+      this._syncRestart(g.seed);
       info.append('Seed ', make('b', '', g.seed), ' · best ' + fmtM(g.bestHeight) + ' · ' + formatTime(g.elapsed));
       if (g.rules) {
         const label = rulesLabel(g.rules);
         info.append(make('br'), label.charAt(0).toUpperCase() + label.slice(1));
       }
+    }
+
+    // "Same seed" beside Restart (pause menu) and Play again (game over): one saved setting for both,
+    // labelled with the seed it would replay. Unticked, they start a new random seed.
+    _syncRestart(seed) {
+      const on = !!this.app.settings.restartSameSeed;
+      for (const c of this.el.sameSeed) c.checked = on;
+      if (seed != null) setText(this.el.sameSeedVal, '(' + seed + ')');
     }
 
     syncSettings() {
@@ -801,6 +881,7 @@
       e.copyFallback.hidden = true;
       e.copyBtn.textContent = 'Copy result';
       e.copyBtn.classList.remove('is-done');
+      this._syncRestart(summary.seed);
       this._overAt = performance.now();
       this.show('over', { replace: true });
     }
@@ -996,10 +1077,6 @@
       const root = this.root;
       root.addEventListener('click', (ev) => this._onClick(ev));
       root.addEventListener('change', (ev) => this._onChange(ev));
-      // Drop and slots react on press, not release, so play feels immediate
-      const tray = this.el.hudTray;
-      tray.addEventListener('pointerdown', (ev) => this._onPress(ev));
-      tray.addEventListener('pointercancel', (ev) => this._onPressCancel(ev));
       this.el.stage.addEventListener('pointerdown', () => { if (this._toasts.length) this._dismissToasts(); });
       // In-game buttons never keep focus, or Space / Enter would also press them
       for (const hud of [this.el.hudTop, this.el.hudTray]) {
@@ -1015,37 +1092,24 @@
       this.el.seedInput.addEventListener('input', () => this._seedHint());
     }
 
-    _onPress(ev) {
-      if (ev.button !== 0) return;
-      const t = ev.target.closest(PRESS_SEL);
-      if (!t) return;
-      t._pressed = true;
-      this._run(t.dataset.action, t);
-    }
-
-    // No click will end a cancelled press (scroll, long-press menu, ...)
-    _onPressCancel(ev) {
-      const t = ev.target && ev.target.closest ? ev.target.closest(PRESS_SEL) : null;
-      if (t) t._pressed = false;
-    }
-
     _onClick(ev) {
       const t = ev.target.closest('[data-action]');
       if (!t || !this.root.contains(t)) return;
-      // The click that ends a press already handled on pointerdown does nothing more, however long
-      // the button was held. Keyboard activation (detail 0) still works.
-      if (t._pressed) {
-        t._pressed = false;
-        if (ev.detail > 0) return;
-      }
+      // A pointer press on a block in the tray is TT.Input's (it selects on pointerdown and may turn
+      // into a drag), so its click does nothing more. Keyboard activation (detail 0) selects.
+      if (t.dataset.action === 'slot' && ev.detail > 0) return;
       this._run(t.dataset.action, t);
       if (ev.detail > 0 && t.closest('.hud')) t.blur();
     }
 
     _onChange(ev) {
       const t = ev.target;
-      if (t.dataset.setting) this.app.setSetting(t.dataset.setting, !!t.checked);
-      else if (t.name === 'set-mode' && t.checked) { this.app.setSetting('mode', t.value); this.syncSettings(); }
+      if (t.dataset.setting) {
+        const key = t.dataset.setting;
+        this.app.setSetting(key, !!t.checked);
+        // Every box bound to this setting (both "Same seed" boxes) shows what was stored
+        for (const c of this.root.querySelectorAll('[data-setting="' + key + '"]')) c.checked = !!this.app.settings[key];
+      } else if (t.name === 'set-mode' && t.checked) { this.app.setSetting('mode', t.value); this.syncSettings(); }
       else if (t.dataset.typeToggle) {
         const enabled = new Set(this.app.settings.enabledTypes);
         if (t.checked) enabled.add(t.dataset.typeToggle); else enabled.delete(t.dataset.typeToggle);
@@ -1063,20 +1127,18 @@
         case 'play': app.startGame({ seed: TT.RNG.randomSeed() }); break;
         case 'play-url': app.startGame({ seed: app.urlSeed }); break;
         case 'daily': app.startGame({ seed: TT.RNG.dailySeed() }); break;
-        case 'new-seed': app.startGame({ seed: TT.RNG.randomSeed() }); break;
         case 'open': this.show(t.dataset.target); break;
         case 'odds': app.showOdds(); break;
         case 'back': this.back(); break;
         case 'seed-random': this.el.seedInput.value = TT.RNG.randomSeed(); this._seedHint(); break;
         case 'resume': app.resume(); break;
-        case 'restart': if (this._confirmed(t)) app.restart(); break;
+        case 'restart': if (this._confirmed(t)) app.restart(); break;   // follows the "Same seed" box
         case 'quit': if (this._confirmed(t)) app.quitToMenu(); break;
         case 'menu': app.quitToMenu(); break;
         case 'copy': this._copyResult(t); break;
         case 'types-all': this._setGroup(t.dataset.group, t.dataset.on === '1'); break;
         case 'pause': app.togglePause(); break;
         case 'mode': if (g) g.cycleMode(); break;
-        case 'drop': if (g) g.drop(); break;
         case 'slot': if (g) g.selectSlot(Number(t.dataset.slot)); break;
         default: break;
       }

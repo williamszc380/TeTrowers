@@ -121,9 +121,10 @@ bounds(block), blocksInRadius(x, y, r), anyAwake()`.
      horizontal velocity is reset to 0 in that substep: the piece falls straight down from there.
    * **fixed** — half-block steps (`FIXED_STEP = 0.5`), no guidance.
    * **manual** — pixel-precise: a key tap moves one screen pixel (`game.pixelSize` world units), holding
-     slides and accelerates; touch drag is 1:1. No guidance.
-5. **Dropping.** Down (or Space / Drop button / swipe down) releases the piece from the hover line
-   (`DROP_GAP` above the tower top, never below `MIN_HOVER_Y`). Falling speed is capped at
+     slides and accelerates; a dragged block follows the pointer to the pixel. No guidance.
+5. **Dropping.** Space / Enter, or letting go of a block dragged out of the tray over the playfield
+   (touch and mouse alike; see §7 `TT.Input`), releases the piece from the hover line (`DROP_GAP`
+   above the tower top, never below `MIN_HOVER_Y`). Falling speed is capped at
    `MAX_FALL_SPEED` until first contact. The next drop is allowed once the previous block has settled,
    or `READY_AFTER_TOUCH` s after it first touched something, or it died, or `READY_MAX` s passed (and at
    least `READY_MIN` s after the drop) — **and** no other block is still in motion (see rule 6: set in
@@ -204,7 +205,7 @@ stats: { drops, lost, livesLost, swallowed, exploded, shattered, melted, frozen,
 update(dt)                 // advance simulation; no-op unless state === 'playing' (or 'over' winding down)
 moveStep(dir)              // dir -1 | +1: assisted = next aligned spot, fixed = 0.5, manual = 1 pixel
 moveBy(dx)                 // continuous (manual hold-slide / manual drag); clamped
-setTargetX(x)              // touch drag: snap per mode (assisted: nearest valid, fixed: 0.5 grid, manual: raw)
+setTargetX(x)              // pointer aim (tray drag, playfield drag): snap per mode (assisted: nearest valid, fixed: 0.5 grid, manual: raw)
 selectNext() / selectSlot(i)
 drop() → bool
 cycleMode() / setMode(mode)
@@ -335,26 +336,80 @@ WebAudio synthesis only (no audio files). `TT.Audio.init()`, `unlock()` (call fr
 `setMuted(b)`, `isMuted()`, `play(name, opts)`, `attach(game)` (subscribe to events), `detach()`.
 
 ### `js/input.js` — `TT.Input`
+`TT.Input.create({ canvas, tray, getGame, getRenderer, isBlocked, onPause, onOdds, onMute, onActivity })`;
+`update(dt)` once per frame (after `game.update`), `isActive()`, `releaseAll()` / `reset()`, `destroy()`,
+`cue` (read-only, polled by ui.js every frame): `{ slot: lifted slot | -1, zone: 'field' | 'cancel' | '',
+queued: bool }`. Also exported: `TT.Input.keyAction(e)`, `TT.Input.selectPrev(game)`.
+
 Keyboard: ←/→ move (assisted/fixed: tap = one step, hold repeats after `KEY_REPEAT_DELAY` every
 `KEY_REPEAT_RATE`; manual: tap = 1 px, hold slides from `MANUAL_SPEED_MIN` to `MANUAL_SPEED_MAX` cells/s),
-↑ next block, ↓ / Space drop, Ctrl cycle mode, Esc / P pause, M mute, 1-3 select slot.
-Pointer on the canvas: horizontal drag moves the piece (`game.setTargetX(startX + dx/scale)`), quick
-downward swipe drops. `preventDefault` on game keys; `touch-action: none` on the canvas.
+↓ next unused block (`game.selectNext()`), ↑ previous unused block (wrapping; `selectPrev`), each once per
+press (OS auto-repeat ignored), Space / Enter / NumpadEnter drop, Ctrl tapped alone cycles mode, Esc / P
+pause, O odds, M mute, 1-3 select slot. ↓ never drops. Space / Enter on a control with keyboard focus
+(`:focus-visible`) or in a text field press that control instead; a control focused by a mouse or touch
+press never keeps the keys (a press on the playfield also blurs it). Nothing drops while paused, over or
+with a menu open.
+
+Pointer — **drag and drop from the tray is the only pointer way to drop**, identical for mouse, touch and
+pen (pointer events; moves are coalesced and applied once per frame in `update`, the zone under the
+pointer comes from `document.elementFromPoint`: the canvas = playfield, inside `tray` = tray, else out):
+* A press on a `[data-slot]` button in `tray` selects that slot at once (`game.selectSlot`; a tap ends
+  there and never drops) and takes pointer capture. Once its *path length* reaches `DRAG_START_PX` (8 CSS
+  px) the block is lifted (`cue.slot`). Over the playfield the piece follows the pointer sideways,
+  `game.setTargetX(worldX − piece.shape.w / 2)` (it stays on the hover line); over the tray or anywhere
+  else (`cue.zone = 'cancel'`) it is back at its pick-up x.
+* Letting go over the playfield aims at the release point and drops (`game.drop()`). When the drop is not
+  allowed yet (`!game.canDrop`), it is queued instead (`cue.queued`, no `deny`): `update` drops it once
+  `canDrop` turns true, provided the same piece object is still in hand. Any new tray press or drag, a
+  key move / selection, another selection made elsewhere (the piece object changes), pause, a menu or
+  `releaseAll` cancels the queued drop; a plain tap on the playfield does not.
+* Letting go anywhere else (tray, HUD, sidebar, outside the window), `pointercancel`, a lost capture of the
+  slot itself, window blur or the page being hidden cancel: nothing drops, the piece goes back to its
+  pick-up x. A press on a used / empty slot does nothing at all.
+* A drag that starts on the playfield moves the piece relative to where it was when the drag began
+  (`game.setTargetX(pieceX + dx / scale)`) and **never drops**; a tap or click on the playfield does nothing.
+* One gesture at a time: other pointers are ignored while a press is active (multi-touch).
+* Only presses with the primary button / a touch / a pen contact play, and only as described above: a
+  pointer that is merely moving changes nothing. The context menu is suppressed on the canvas and the
+  slots (long presses).
+`preventDefault` on game keys; `touch-action: none` on the canvas and the slots.
 
 ### `index.html`, `css/style.css`, `js/ui.js`, `js/main.js` — `TT.UI`, `TT.App`
 Screens: title (Play, Daily Challenge, Enter Seed, Special Blocks, How to Play, Settings, best score),
 seed entry, special-blocks toggles (grouped positive/negative with previews + descriptions, All on/off,
 default all on), how-to-play (controls + rules + block codex), settings (default mode, sound, vibration,
 ghost preview, reduced motion), HUD (lives + shield, height/best, mode button, pause, odds, seed),
-batch tray (3 slots with previews, selected highlight, used dimmed, selected block's description), drop
-button with readiness ring, pause overlay, game-over (best height, time, drops, seed + rules, new best,
-copy result, play same seed, new seed, menu), first-time "new block" toasts.
+batch tray (3 big slots with previews, at least 64 px each way on phones, selected highlight, used
+dimmed, the selected block's description), a drag hint and key hints in the wide sidebar
+(keys hidden on touch-only devices and below 720 px of height, the drag hint below 560 px), pause overlay
+(resume, block odds, **Restart** + "Same seed" box, how to play, settings, quit to menu), game-over (best
+height, time, drops, seed + rules, new best, **Play again** + "Same seed" box, copy result, menu),
+first-time "new block" toasts and a one-time "Drag a block onto the playfield" tip (`Seen` key `#drag`).
+Drag cues (ui.js mirrors `input.cue`, touching the DOM only on change): the lifted slot gets `.is-lifted`
+(dashed outline); `#hud-tray` gets `.is-dragging` over the playfield ("Let go over the playfield to drop
+it · drag back here to cancel") or `.is-cancel` elsewhere ("Release to cancel", tray highlighted), shown
+in `#tray-cue` over the description; `.app.is-dragging` sets the grabbing cursor; `#drop-cue` ("Dropping
+when ready" + a `readyProgress` bar) is placed above the hovering piece (below it when there is no room)
+while a drop is queued. Slot clicks with `detail > 0` are TT.Input's; keyboard activation selects.
+Restart / Play again start a **new random seed** by default, keeping the run's mode and block set. The
+"Same seed (SEED)" checkbox beside each of them (unticked by default) replays the current seed instead; both
+boxes are bound to the saved setting `settings.restartSameSeed` (`data-setting="restartSameSeed"`; settings
+saved before it existed load as `false`). Restart mid-run (turn > 0) needs a second press (`data-confirm`).
 Layout: portrait ⇒ tray at the bottom; aspect ≥ 1 ⇒ sidebar on the right. Safe-area insets respected.
-`TT.App` = `{ settings, game, renderer, audio, input, ui, startGame(opts), restart(), quitToMenu() }`.
-Main loop: rAF, `game.update(dt)` then `renderer.render(dt)`; when nothing is awake/animating and no
-input for 2 s, render at `IDLE_FPS`; pause automatically on `visibilitychange`.
+`TT.App` = `{ settings, game, renderer, audio, input, ui, startGame(opts), restart(opts), quitToMenu(),
+loadSettings(), lockPortrait(), ... }`; `restart({ sameSeed })`: `sameSeed` (boolean) overrides the
+setting, otherwise the setting decides.
+Portrait lock: at boot, whenever a game starts and when the page becomes visible again, `lockPortrait()`
+calls `screen.orientation.lock('portrait-primary')` (rejection swallowed) if the page runs as an
+installed app (`display-mode` standalone, fullscreen or minimal-ui) on a touch device (`maxTouchPoints`
+or `any-pointer: coarse`); anywhere else (desktop, browser tab, file://) it does nothing. The manifest's
+`orientation: portrait-primary` does the same for the installed app.
+Main loop: rAF, `game.update(dt)`, `input.update(dt)`, `ui.update(dt)`, then `renderer.render(dt)`; when
+nothing is awake/animating and no input (nor a queued drop) for 2 s, render at `IDLE_FPS`; pause
+automatically on `visibilitychange`.
 Storage (all wrapped in try/catch): `tetrowers.settings`, `tetrowers.best` (`{"SEED|rules": {height, time, date}}`),
-`tetrowers.seen` (type keys already introduced). `?debug=1` shows FPS / bodies / awake / step ms.
+`tetrowers.seen` (type keys already introduced, and `#drag` once the drag tip was shown). `?debug=1` shows
+FPS / bodies / awake / step ms.
 
 ### Packaging
 `manifest.webmanifest` (relative `start_url: "./"`, `scope: "./"`, display standalone, icons 192/512 +

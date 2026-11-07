@@ -1,12 +1,16 @@
-/* DOM-light parts of js/ui.js in Node: the Drop / slot press guard (one action per pointer press,
- * however long the hold), the pending-run snapshot (a run the OS kills still gets its record,
- * without spoiling the game-over badge), and the Back guard's history state machine. */
+/* DOM-light parts of js/ui.js (and TT.App from js/main.js) in Node: slot buttons leave pointer
+ * presses to TT.Input (no Drop button any more), the drag cues mirror TT.Input's state, both "Same
+ * seed" boxes share one setting, Restart / Play again use a new random seed unless "Same seed" is
+ * ticked (persisted as restartSameSeed, false for older saves), the installed app locks portrait,
+ * the pending-run snapshot (a run the OS kills still gets its record, without spoiling the
+ * game-over badge), toasts, and the Back guard's history state machine. */
 'use strict';
 const assert = require('assert');
 const path = require('path');
 const TT = require('./load-core')();
 
 const UI_FILE = path.join(__dirname, '..', 'js/ui.js');
+const MAIN_FILE = path.join(__dirname, '..', 'js/main.js');
 const local = new Map();   // a fake localStorage shared by "page loads"
 global.window = {
   TT,
@@ -23,50 +27,245 @@ function loadUI() {
   return TT.UI;
 }
 
-// --- Drop / slot buttons: the click ending a handled press never acts again ---------------------
+// Just enough DOM: class lists, text, style, children
+function el(tag) {
+  const cls = new Set();
+  const n = {
+    tagName: String(tag || 'div').toUpperCase(), children: [], parent: null, dataset: {}, hidden: false,
+    clientWidth: 0, clientHeight: 0, offsetWidth: 0, offsetHeight: 0, style: { setProperty() {} }, writes: 0,
+    _text: '',
+    get textContent() { return n._text; },
+    set textContent(v) { n._text = String(v); n.writes++; },
+    set className(v) { cls.clear(); for (const c of String(v).split(/\s+/)) if (c) cls.add(c); },
+    get className() { return Array.from(cls).join(' '); },
+    classList: {
+      add: (...c) => { for (const x of c) cls.add(x); }, remove: (...c) => { for (const x of c) cls.delete(x); },
+      contains: (c) => cls.has(c),
+      toggle: (c, on) => { if (on === undefined ? !cls.has(c) : on) cls.add(c); else cls.delete(c); }
+    },
+    appendChild(c) { c.parent = n; n.children.push(c); return c; },
+    remove() { if (n.parent) { n.parent.children.splice(n.parent.children.indexOf(n), 1); n.parent = null; } }
+  };
+  return n;
+}
+
+// --- Slot buttons: pointer presses belong to TT.Input; there is no Drop button any more -------------
 {
   const { UI } = loadUI();
-  let clock = 0;                                   // every press below is held for 2 s
-  globalThis.performance = { now: () => (clock += 1000) };
+  globalThis.performance = { now: () => 1e6 };
+  assert.strictEqual(UI.prototype._onPress, undefined, 'no press-to-act path (it drove the Drop button)');
   const calls = [];
   const ui = Object.create(UI.prototype);
   ui.root = { contains: () => true };
   ui._run = (action) => calls.push(action);
-  const button = (action) => {
-    const b = { dataset: { action }, blur() {} };
-    b.closest = (sel) => (sel === '.hud' ? null : sel.includes('[data-action') && (sel === '[data-action]' || sel.includes('"' + action + '"')) ? b : null);
+  const button = (action, inHud) => {
+    const b = { dataset: { action }, blurs: 0, blur() { this.blurs++; } };
+    b.closest = (sel) => (sel === '[data-action]' ? b : sel === '.hud' ? (inHud ? {} : null) : null);
     return b;
   };
-  const drop = button('drop'), slot = button('slot'), pause = button('pause');
-
-  ui._onPress({ target: drop, button: 0 });
-  assert.deepStrictEqual(calls, ['drop'], 'pointerdown drops');
-  ui._onClick({ target: drop, detail: 1 });          // the click after a 2 s hold (was a 2nd drop)
-  assert.deepStrictEqual(calls, ['drop'], 'its click does nothing more');
-  ui._onClick({ target: drop, detail: 0 });          // Enter / Space on the focused button
-  assert.deepStrictEqual(calls, ['drop', 'drop'], 'keyboard activation still drops');
-
-  ui._onPress({ target: drop, button: 2 });          // right button: ignored
-  ui._onClick({ target: drop, detail: 1 });          // a click with no press of its own acts
-  assert.deepStrictEqual(calls, ['drop', 'drop', 'drop']);
-
-  calls.length = 0;
-  ui._onPress({ target: slot, button: 0 });
-  ui._onClick({ target: slot, detail: 1 });
-  ui._onPress({ target: slot, button: 0 });
+  const slot = button('slot', true), pause = button('pause', true), resume = button('resume', false);
+  ui._onClick({ target: slot, detail: 1 });          // tap / click: TT.Input already picked it on pointerdown
   ui._onClick({ target: slot, detail: 2 });          // double click
-  assert.deepStrictEqual(calls, ['slot', 'slot'], 'slot: one action per press');
+  assert.deepStrictEqual(calls, [], 'pointer clicks on a slot do nothing more');
+  ui._onClick({ target: slot, detail: 0 });          // Enter / Space on a slot the player tabbed to
+  assert.deepStrictEqual(calls, ['slot'], 'keyboard activation selects');
+  ui._onClick({ target: pause, detail: 1 });
+  assert.deepStrictEqual(calls, ['slot', 'pause'], 'other buttons act on click');
+  assert.strictEqual(pause.blurs, 1, 'a clicked HUD button lets go of the focus (Space / Enter drop again)');
+  ui._onClick({ target: resume, detail: 0 });
+  assert.strictEqual(resume.blurs, 0, 'keyboard focus stays where the player put it');
+}
 
-  calls.length = 0;
-  ui._onPress({ target: drop, button: 0 });
-  ui._onPressCancel({ target: drop });               // cancelled press: no click follows...
-  ui._onClick({ target: drop, detail: 1 });          // ...so a later click is not swallowed
-  assert.deepStrictEqual(calls, ['drop', 'drop'], 'pointercancel clears the press');
+// --- Drag cues: lifted slot, "Release to cancel" over the tray, "Dropping when ready" by the piece -----
+{
+  const { UI } = loadUI();
+  const ui = Object.create(UI.prototype);
+  ui.slots = [0, 1, 2].map(() => ({ btn: el('button') }));
+  const tray = el('footer'), trayCue = el('p'), dropCue = el('div'), bar = el('i');
+  dropCue.hidden = true;
+  dropCue.offsetWidth = 140;
+  dropCue.offsetHeight = 30;
+  ui.el = { hudTray: tray, trayCue, dropCue, dropCueBar: bar };
+  ui.root = el('div');
+  ui.hud = {};
+  ui._stageW = 400;
+  ui._pt = { x: 0, y: 0 };
+  const cue = { slot: -1, zone: '', queued: false };
+  // 25 px per cell, world y 24 at the top of the playfield
+  ui.app = { input: { cue }, renderer: { scale: 25, worldToScreen: (x, y, o) => { o.x = x * 25; o.y = (24 - y) * 25; return o; } } };
+  const game = { piece: { x: 6, y: 10, shape: { w: 2, h: 3 } }, readyProgress: 0.5 };
+  const lifted = () => ui.slots.map((s) => s.btn.classList.contains('is-lifted'));
+  const has = (n, c) => n.classList.contains(c);
 
-  calls.length = 0;
-  ui._onClick({ target: pause, detail: 1 });         // other buttons act on click as before
-  ui._onPress({ target: pause, button: 0 });
-  assert.deepStrictEqual(calls, ['pause']);
+  ui._syncDrag(game);
+  assert.deepStrictEqual(lifted(), [false, false, false]);
+  assert.ok(!has(tray, 'is-dragging') && !has(tray, 'is-cancel') && dropCue.hidden);
+  // Picked up, still over the tray
+  cue.slot = 1;
+  cue.zone = 'cancel';
+  ui._syncDrag(game);
+  assert.deepStrictEqual(lifted(), [false, true, false], 'the dragged slot is lifted');
+  assert.ok(has(tray, 'is-cancel') && !has(tray, 'is-dragging') && has(ui.root, 'is-dragging'));
+  assert.strictEqual(trayCue.textContent, 'Release to cancel');
+  // Over the playfield
+  cue.zone = 'field';
+  ui._syncDrag(game);
+  assert.ok(has(tray, 'is-dragging') && !has(tray, 'is-cancel'));
+  assert.ok(/drop/.test(trayCue.textContent) && /cancel/.test(trayCue.textContent), 'says how to drop and cancel');
+  const writes = trayCue.writes;
+  for (let i = 0; i < 5; i++) ui._syncDrag(game);
+  assert.strictEqual(trayCue.writes, writes, 'the DOM changes only when the state does');
+  // Let go too early: the cue sits centred above the piece, with the readiness bar
+  cue.slot = -1;
+  cue.zone = '';
+  cue.queued = true;
+  ui._syncDrag(game);
+  assert.deepStrictEqual(lifted(), [false, false, false]);
+  assert.ok(!has(tray, 'is-dragging') && !has(tray, 'is-cancel') && !has(ui.root, 'is-dragging'));
+  assert.ok(!dropCue.hidden, 'Dropping when ready');
+  assert.strictEqual(dropCue.style.transform, 'translate(105px, 237px)', 'centred above the piece');
+  assert.strictEqual(bar.style.transform, 'scaleX(0.5)');
+  game.piece.y = 20;                                  // at the very top: below the piece instead
+  ui._syncDrag(game);
+  assert.strictEqual(dropCue.style.transform, 'translate(105px, 108px)');
+  game.piece.x = 15;                                  // at the right edge: kept inside the playfield
+  game.readyProgress = 0.9;
+  ui._syncDrag(game);
+  assert.strictEqual(dropCue.style.transform, 'translate(256px, 108px)');
+  assert.strictEqual(bar.style.transform, 'scaleX(0.9)');
+  cue.queued = false;
+  ui._syncDrag(game);
+  assert.ok(dropCue.hidden, 'gone when the drop happened or was cancelled');
+  // A new run starts clean, whatever the previous one left behind
+  cue.slot = 2;
+  cue.zone = 'cancel';
+  ui._syncDrag(game);
+  ui._clearDragCues();
+  assert.deepStrictEqual(lifted(), [false, false, false]);
+  assert.ok(!has(tray, 'is-cancel') && !has(ui.root, 'is-dragging') && dropCue.hidden);
+}
+
+// --- "Same seed" beside Restart and Play again: one setting, both boxes, labelled with the seed ------
+{
+  const { UI } = loadUI();
+  const ui = Object.create(UI.prototype);
+  const box = () => ({ checked: false, dataset: { setting: 'restartSameSeed' } });
+  const boxes = [box(), box()], labels = [el('b'), el('b')];
+  ui.app = { settings: { restartSameSeed: false }, setSetting(k, v) { this.settings[k] = v; }, sfx() {}, wake() {} };
+  ui.el = { sameSeed: boxes, sameSeedVal: labels };
+  ui.root = { querySelectorAll: (sel) => (sel === '[data-setting="restartSameSeed"]' ? boxes : []) };
+  ui._syncRestart('K7QP2M');
+  assert.deepStrictEqual(boxes.map((b) => b.checked), [false, false], 'unticked by default');
+  assert.deepStrictEqual(labels.map((l) => l.textContent), ['(K7QP2M)', '(K7QP2M)'], 'shows the seed it would replay');
+  boxes[1].checked = true;                            // ticked on the game-over screen
+  ui._onChange({ target: boxes[1] });
+  assert.strictEqual(ui.app.settings.restartSameSeed, true);
+  assert.deepStrictEqual(boxes.map((b) => b.checked), [true, true], 'the pause menu box follows');
+  boxes[0].checked = false;
+  ui._onChange({ target: boxes[0] });
+  assert.deepStrictEqual(boxes.map((b) => b.checked), [false, false]);
+  assert.strictEqual(ui.app.settings.restartSameSeed, false);
+}
+
+// --- TT.App: restart seeds, the restartSameSeed setting, the portrait lock --------------------------
+{
+  local.clear();
+  loadUI();
+  const realDoc = global.document;
+  global.document = {
+    readyState: 'loading', addEventListener() {},      // boot() never runs here
+    getElementById: () => ({ getBoundingClientRect: () => ({ width: 0, height: 0 }) }),
+    documentElement: { classList: { toggle() {} } }
+  };
+  globalThis.performance = { now: () => 5000 };
+  let standalone = false, coarse = false;
+  const locks = [];
+  window.matchMedia = (q) => ({ matches: (q === '(display-mode: standalone)' && standalone) || (q === '(any-pointer: coarse)' && coarse) });
+  global.screen = { orientation: { lock: (o) => { locks.push(o); return Promise.reject(new Error('NotSupportedError')); } } };
+  try {
+    delete require.cache[require.resolve(MAIN_FILE)];
+    require(MAIN_FILE);
+    const App = TT.App;
+    const settingsKey = TT.Storage.KEYS.settings;
+
+    // Settings: off by default, also for settings saved before the option existed
+    assert.strictEqual(App.loadSettings().restartSameSeed, false, 'a new player: off');
+    local.set(settingsKey, JSON.stringify({ mode: 'fixed', sound: false, enabledTypes: TT.SPECIAL_KEYS }));
+    loadUI();
+    let s = App.loadSettings();
+    assert.ok(s.restartSameSeed === false && s.mode === 'fixed' && s.sound === false, 'older settings: off, the rest kept');
+    local.set(settingsKey, JSON.stringify({ restartSameSeed: 'yes' }));
+    loadUI();
+    assert.strictEqual(App.loadSettings().restartSameSeed, false, 'junk: off');
+    local.set(settingsKey, JSON.stringify({ restartSameSeed: true }));
+    loadUI();
+    assert.strictEqual(App.loadSettings().restartSameSeed, true);
+    local.clear();
+    loadUI();
+
+    App.settings = App.loadSettings();
+    App.ui = { bindGame() {}, closeAll() {}, show() {}, toast() {}, onLayout() {}, syncSettings() {}, isMenuOpen: () => false };
+    App.input = { reset() {}, releaseAll() {}, isActive: () => false };
+    App.renderer = null;
+    App.audio = null;
+    App.setSetting('restartSameSeed', true);
+    assert.strictEqual(JSON.parse(local.get(settingsKey)).restartSameSeed, true, 'saved');
+    loadUI();
+    assert.strictEqual(App.loadSettings().restartSameSeed, true, 'and loaded again on the next start');
+    App.setSetting('restartSameSeed', false);
+    assert.strictEqual(JSON.parse(local.get(settingsKey)).restartSameSeed, false);
+
+    // Restart / Play again: a new random seed by default, mode and block set kept
+    const set = ['steel', 'mine', 'vine'];
+    App.startGame({ seed: 'OLDSEED', mode: 'fixed', enabledTypes: set });
+    assert.strictEqual(App.game.seed, 'OLDSEED');
+    const seen = new Set(['OLDSEED']);
+    for (let i = 0; i < 5; i++) {
+      const prev = App.game.seed;
+      App.restart();
+      assert.notStrictEqual(App.game.seed, prev, 'restart: a new seed');
+      assert.ok(/^[A-Z0-9]{6}$/.test(App.game.seed), 'a random seed: ' + App.game.seed);
+      assert.strictEqual(App.game.mode, 'fixed', 'mode kept');
+      assert.deepStrictEqual(Array.from(App.game.enabledTypes).sort(), set.slice().sort(), 'block set kept');
+      seen.add(App.game.seed);
+    }
+    assert.strictEqual(seen.size, 6, 'every restart a different seed');
+    // Same seed ticked: the seed replays
+    App.setSetting('restartSameSeed', true);
+    const same = App.game.seed;
+    App.restart();
+    assert.strictEqual(App.game.seed, same, 'Same seed: replayed');
+    App.restart();
+    assert.strictEqual(App.game.seed, same);
+    // An explicit option overrides the box either way
+    App.restart({ sameSeed: false });
+    assert.notStrictEqual(App.game.seed, same, '{ sameSeed: false } overrides the box');
+    App.setSetting('restartSameSeed', false);
+    const again = App.game.seed;
+    App.restart({ sameSeed: true });
+    assert.strictEqual(App.game.seed, again, '{ sameSeed: true } overrides the box');
+
+    // Portrait lock: only an installed app on a touch device; a refusal is swallowed
+    locks.length = 0;
+    assert.strictEqual(App.lockPortrait(), false, 'a browser tab: no lock');
+    standalone = true;
+    assert.strictEqual(App.lockPortrait(), false, 'installed on a desktop without touch: no lock');
+    coarse = true;
+    assert.strictEqual(App.lockPortrait(), true, 'installed on a phone: locked');
+    assert.deepStrictEqual(locks, ['portrait-primary']);
+    App.restart();
+    assert.deepStrictEqual(locks, ['portrait-primary', 'portrait-primary'], 'again when a game starts');
+    global.screen = { orientation: { lock: () => { throw new Error('SecurityError'); } } };
+    assert.strictEqual(App.lockPortrait(), false, 'a lock that throws is harmless');
+    global.screen = {};
+    assert.strictEqual(App.lockPortrait(), false, 'no Screen Orientation API: nothing to do');
+    delete global.screen;
+    assert.strictEqual(App.lockPortrait(), false);
+  } finally {
+    delete global.screen;
+    delete window.matchMedia;
+    if (realDoc === undefined) delete global.document; else global.document = realDoc;
+  }
 }
 
 // --- Pending run snapshot ---------------------------------------------------------------------

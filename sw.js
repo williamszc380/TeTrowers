@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const VERSION = '1.0.0';            // keep in sync with CONFIG.VERSION (js/config.js)
+const VERSION = '1.1.0';            // keep in sync with CONFIG.VERSION (js/config.js)
 const CACHE_PREFIX = 'tetrowers-';
 const CACHE = CACHE_PREFIX + VERSION;
 

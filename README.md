@@ -33,9 +33,9 @@ no downloads, accounts or build step.
 
 1. Each round deals you **3 blocks**. They are shown at the bottom on portrait screens and on the
    right on wide screens. Place them in any order.
-2. Move the hovering block left and right, then drop it. It falls onto the 6-wide platform (or onto
-   your tower) and the physics takes over. Blocks are **never rotated**, and all 19 tetromino
-   orientations are equally likely.
+2. Drag a block from the tray onto the playfield, aim it, and let go to drop it (or use the
+   keyboard). It falls onto the 6-wide platform (or onto your tower) and the physics takes over.
+   Blocks are **never rotated**, and all 19 tetromino orientations are equally likely.
 3. Your score is the **best height** your tower reaches. You have 3 lives. When the last one is gone
    the run is over.
 
@@ -49,18 +49,35 @@ which block unlocks next.
 
 ## Controls
 
-| Action | Keyboard | Touch |
-|---|---|---|
-| Move the block | <kbd>←</kbd> <kbd>→</kbd> (hold to repeat) | Drag anywhere on the playfield |
-| Switch block | <kbd>↑</kbd>, or <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> to pick a slot | Tap a block in the tray |
-| Drop | <kbd>↓</kbd> or <kbd>Space</kbd> | **Drop** button, or a quick swipe down |
-| Placement mode | <kbd>Ctrl</kbd> (cycles assisted → fixed → manual) | Mode button |
-| Pause | <kbd>Esc</kbd> or <kbd>P</kbd> | Pause button |
-| Block odds | <kbd>O</kbd> | Tap the Good / Bad odds |
-| Sound on/off | <kbd>M</kbd> | Settings |
+Touch and the mouse work exactly the same way, on the phone and on the PC.
 
-The ring around the Drop button shows when the next drop is ready. You can line up the next block
-while you wait. Opening the block odds during play pauses the game until you close the panel.
+| Action | Touch or mouse | Keyboard |
+|---|---|---|
+| Drop a block | Drag it from the tray onto the playfield and let go | <kbd>Space</kbd> or <kbd>Enter</kbd> |
+| Aim | While you drag, the block follows your finger or the mouse | <kbd>←</kbd> <kbd>→</kbd> (hold to repeat) |
+| Cancel | Drag the block back into the tray and let go | |
+| Switch block | Tap or click a block in the tray | <kbd>↓</kbd> next block, <kbd>↑</kbd> previous block, or <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> |
+| Placement mode | Mode button | <kbd>Ctrl</kbd> (cycles assisted → fixed → manual) |
+| Pause | Pause button | <kbd>Esc</kbd> or <kbd>P</kbd> |
+| Block odds | Tap or click the Good / Bad odds | <kbd>O</kbd> |
+| Sound on/off | Settings | <kbd>M</kbd> |
+
+**Dragging is the only way to drop with touch or the mouse.** Pick a block up in the tray (the
+bottom of a portrait screen, the right-hand sidebar on a wide one) and move it over the playfield:
+the hovering block follows your finger or the mouse sideways, with the landing outline showing
+where it will end up. Let go over the playfield and it drops. Drag it back into the tray, or let go
+anywhere that is not the playfield, and nothing drops: the block stays in its slot. A tap or click
+on a block only selects it, and a drag that starts on the playfield only moves the block, it never
+drops it.
+
+If you let go while the previous block is still settling, the block waits and drops as soon as it
+is allowed (*Dropping when ready* appears next to it, with a bar that fills up). A new drag, picking
+another block, a key press or pausing cancels the waiting drop. While the next drop is not ready
+yet, the hovering block is drawn faded.
+
+The whole game also works with the keyboard alone. <kbd>Space</kbd> and <kbd>Enter</kbd> press a
+button you moved to with <kbd>Tab</kbd>; after clicking a button with the mouse they drop again
+straight away. Opening the block odds during play pauses the game until you close the panel.
 
 ## Placement modes
 
@@ -68,7 +85,7 @@ while you wait. Opening the block odds during play pauses the game until you clo
 |---|---|
 | **Assisted** (default) | Steps between the spots where the block will sit flush with the block it lands on, even when the tower has drifted a little. Over empty space, the bare platform or a steeply tilted block it uses half-block steps. While falling, the block follows its target, so a support that shifts slightly can't make it clip a corner and miss. |
 | **Fixed** | Half-block steps. No help while falling. |
-| **Manual** | Pixel-precise. A key tap moves one pixel, holding slides faster and faster, and dragging is 1:1. No help while falling. |
+| **Manual** | Pixel-precise. A key tap moves one pixel, holding slides faster and faster, and a dragged block goes exactly where your finger or the mouse points. No help while falling. |
 
 The starting mode can be set in *Settings*.
 
@@ -135,6 +152,10 @@ heights, so you and your friends can compete fairly.
 - **Play**: a new random 6-character seed.
 - **Daily Challenge**: one seed per calendar day, the same for everyone.
 - **Enter Seed**: any text up to 32 characters (case and extra spaces don't matter).
+- **Restart / Play again**: *Restart* in the pause menu and *Play again* on the game-over screen
+  start a new random seed, keeping your placement mode and block set. Tick **Same seed** next to
+  them to replay the seed you are on instead. The box is shared by both screens and remembered on
+  that device (it starts unticked). Restarting a run in progress asks you to press again.
 - **Links**: `https://williamszc380.github.io/TeTrowers/?seed=K7QP2M` opens the game with that seed
   ready to play. *Copy result* on the game-over screen copies your height, time and such a link.
 
@@ -203,7 +224,8 @@ There is nothing to build. The empty `.nojekyll` file makes Pages serve every fi
 works from the `/TeTrowers/` subpath as well as from `file://`.
 
 **On Android:** open the address in Chrome, then use the menu (⋮) → **Add to Home screen** /
-**Install app**. TeTrowers then starts full-screen from its own icon and plays offline.
+**Install app**. TeTrowers then starts full-screen from its own icon and plays offline. The
+installed app always stays upright (portrait), even when the phone's auto-rotate is on.
 
 ## Releasing an update
 

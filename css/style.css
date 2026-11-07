@@ -20,8 +20,7 @@
   --accent: #8ee3ff;
   --focus: #ffffff;
   --side-w: clamp(240px, 26vw, 330px);
-  --slot: clamp(62px, 19.5vw, 88px);
-  --drop: clamp(68px, 20vw, 84px);
+  --slot: clamp(80px, 22vw, 104px);   /* portrait slot height (they share the tray's width) */
   --safe-t: env(safe-area-inset-top, 0px);
   --safe-r: env(safe-area-inset-right, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
@@ -110,6 +109,9 @@ kbd {
   display: block;
   touch-action: none;
 }
+/* Blocks are dragged out of the tray: grab cursor on them, grabbing everywhere while one is held */
+.app:not(.no-game) .slot:not(.is-used):not(.is-empty) { cursor: grab; }
+.app.is-dragging, .app.is-dragging * { cursor: grabbing !important; }
 
 /* ---- HUD: top bar (portrait) ------------------------------------------------------------ */
 .hud { background: var(--panel); min-width: 0; }
@@ -206,20 +208,20 @@ kbd {
   position: relative;
   z-index: 2;
   display: grid;
-  grid-template-columns: auto auto;
-  grid-template-areas: "desc desc" "slots actions";
-  justify-content: center;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "info" "slots";
+  justify-items: center;
   align-items: center;
-  column-gap: 12px;
   row-gap: 6px;
   padding: 7px calc(10px + var(--safe-r)) calc(10px + var(--safe-b)) calc(10px + var(--safe-l));
   border-top: 1px solid var(--line);
   box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.3);
+  transition: background 0.12s, box-shadow 0.12s;
 }
 
+/* The selected block's description, or the drag cue in its place */
+.tray-info { grid-area: info; position: relative; justify-self: stretch; min-width: 0; }
 .hud-desc {
-  grid-area: desc;
-  justify-self: stretch;
   margin: 0;
   height: 2.7em;
   overflow: hidden;
@@ -236,7 +238,36 @@ kbd {
 .hud-desc.cat-positive b { color: var(--cold); }
 .hud-desc.cat-negative b { color: var(--warm); }
 
-.slots { grid-area: slots; display: flex; gap: 8px; }
+.tray-cue {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+  color: var(--muted);
+  text-align: center;
+}
+.hud-tray.is-dragging .tray-cue, .hud-tray.is-cancel .tray-cue { display: flex; }
+.hud-tray.is-dragging .hud-desc, .hud-tray.is-cancel .hud-desc { visibility: hidden; }
+/* Over the tray (or anywhere that is not the playfield) letting go cancels: say so loudly */
+.hud-tray.is-cancel {
+  background: #1b2850;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55), 0 -2px 12px rgba(0, 0, 0, 0.3);
+}
+.hud-tray.is-cancel .tray-cue { color: #ffffff; font-size: 15px; font-weight: 800; letter-spacing: 0.02em; }
+
+/* Three equal slots across the tray: big, easy-to-grab targets */
+.slots {
+  grid-area: slots;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  width: min(100%, 480px);
+}
 .slot {
   position: relative;
   display: flex;
@@ -244,13 +275,14 @@ kbd {
   align-items: center;
   justify-content: center;
   gap: 1px;
-  width: var(--slot);
-  height: calc(var(--slot) + 14px);
+  min-width: 0;
+  height: var(--slot);
   padding: 4px 4px 6px;
   border-radius: 14px;
   border: 2px solid rgba(255, 255, 255, 0.07);
   background: rgba(255, 255, 255, 0.045);
   color: var(--text);
+  touch-action: none;   /* a block can be dragged out of the tray onto the playfield */
   transition: border-color 0.12s, background 0.12s, opacity 0.2s, box-shadow 0.12s;
 }
 .slot::before {
@@ -274,7 +306,17 @@ kbd {
 .slot.is-used { opacity: 0.25; }
 .slot.is-used .slot-canvas { filter: grayscale(1); }
 .slot.is-empty .slot-canvas { visibility: hidden; }
-.slot-canvas { display: block; width: calc(var(--slot) - 20px); height: calc(var(--slot) - 20px); }
+/* Lifted out (being dragged): an outline where the block was; it comes back if the drag is cancelled */
+.slot.is-lifted {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: rgba(142, 227, 255, 0.06);
+  box-shadow: none;
+}
+.slot.is-lifted .slot-canvas { opacity: 0.3; }
+.hud-tray.is-cancel .slot.is-lifted { border-color: #ffffff; background: rgba(255, 255, 255, 0.1); }
+.hud-tray.is-cancel .slot.is-lifted .slot-canvas { opacity: 1; }
+.slot-canvas { display: block; flex: none; width: calc(var(--slot) - 28px); height: calc(var(--slot) - 28px); }
 .slot-text { display: flex; flex-direction: column; align-items: center; min-width: 0; max-width: 100%; }
 .slot-name {
   max-width: 100%;
@@ -289,52 +331,33 @@ kbd {
 .slot-cat { display: none; }
 .slot-key { position: absolute; top: 4px; left: 4px; min-width: 18px; height: 18px; font-size: 10px; opacity: 0.75; }
 
-.tray-actions { grid-area: actions; display: flex; align-items: center; gap: 10px; }
+.tray-actions { display: flex; align-items: center; gap: 10px; }
 
-.drop-btn {
-  position: relative;
-  flex: none;
-  width: var(--drop);
-  height: var(--drop);
-  margin: 6px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  color: #ffffff;
-  background: radial-gradient(circle at 50% 28%, #6cd0ff 0%, #2f7bf0 55%, #1f4fbf 100%);
-  box-shadow: 0 6px 20px rgba(47, 123, 240, 0.45), inset 0 -4px 0 rgba(0, 0, 0, 0.2);
-  font-size: 15px;
-  font-weight: 850;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  transition: transform 0.08s, box-shadow 0.15s, color 0.15s;
-}
-.drop-btn .drop-label { position: relative; }
-.drop-btn .ring {
+/* "Dropping when ready": a drop let go before it was allowed waits; ui.js keeps it by the piece */
+.drop-cue {
   position: absolute;
-  inset: -6px;
-  width: calc(100% + 12px);
-  height: calc(100% + 12px);
-  transform: rotate(-90deg);
+  left: 0;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 5px 10px 6px;
+  border-radius: 10px;
+  border: 1px solid rgba(142, 227, 255, 0.4);
+  background: rgba(9, 13, 29, 0.86);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 15px;
+  white-space: nowrap;
   pointer-events: none;
+  will-change: transform;
 }
-.ring-bg { fill: none; stroke: rgba(255, 255, 255, 0.1); stroke-width: 5; }
-.ring-fg {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 5;
-  stroke-dasharray: 100 100;
-  stroke-dashoffset: 0;
-}
-.drop-btn:not(.is-ready) {
-  color: rgba(255, 255, 255, 0.5);
-  background: radial-gradient(circle at 50% 28%, #46526f 0%, #2a3350 70%);
-  box-shadow: inset 0 -4px 0 rgba(0, 0, 0, 0.2);
-  cursor: default;
-}
-.drop-btn:not(.is-ready) .ring-fg { stroke: #6aa3d6; }
-.drop-btn.is-ready:active { transform: scale(0.95); }
-.drop-btn.is-pop { animation: pop 0.3s ease-out; }
+.cue-bar { display: block; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
+.cue-bar i { display: block; height: 100%; background: var(--accent); transform: scaleX(0); transform-origin: left center; }
 
 /* ---- Wide layout: sidebar on the right ------------------------------------------------------ */
 @media (min-aspect-ratio: 1/1) {
@@ -384,29 +407,32 @@ kbd {
     box-shadow: none;
     scrollbar-width: thin;
   }
-  .slots { order: 1; flex-direction: column; gap: 8px; }
-  .hud-desc { order: 2; flex: none; height: 4.05em; -webkit-line-clamp: 3; line-clamp: 3; text-align: left; }
-  .tray-actions { order: 3; justify-content: space-between; }
-  .hud-keys { order: 4; }
-  .hud-seed { order: 5; margin-top: auto; }
+  .hud-tray.is-cancel { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55); }
+  .slots { order: 1; grid-template-columns: minmax(0, 1fr); gap: 8px; width: auto; }
+  .tray-info { order: 2; flex: none; }
+  .hud-desc { height: 4.05em; -webkit-line-clamp: 3; line-clamp: 3; text-align: left; }
+  .tray-cue { justify-content: flex-start; text-align: left; }
+  .tray-actions { order: 3; }
+  .hud-drag { order: 4; }
+  .hud-keys { order: 5; }
+  .hud-seed { order: 6; margin-top: auto; }
 
   .slot {
     flex-direction: row;
     justify-content: flex-start;
     gap: 12px;
     width: 100%;
-    height: 66px;
+    height: 76px;
     padding: 5px 12px 5px 34px;
   }
   .slot::before { top: 18%; bottom: 18%; left: -2px; right: auto; width: 3px; height: auto; border-radius: 0 3px 3px 0; }
-  .slot-canvas { width: 54px; height: 54px; flex: none; }
+  .slot-canvas { width: 64px; height: 64px; }
   .slot-text { align-items: flex-start; }
   .slot-name { font-size: 15px; }
   .slot-cat { display: block; font-size: 12px; color: var(--muted); white-space: nowrap; }
   .slot-key { top: 50%; left: 8px; transform: translateY(-50%); }
 
-  .tray-actions .pill { flex: 1 1 auto; height: 56px; border-radius: 16px; font-size: 16px; }
-  .drop-btn { --drop: 86px; margin: 7px; }
+  .tray-actions .pill { flex: 1 1 auto; height: 52px; border-radius: 16px; font-size: 16px; }
 }
 
 @media not all and (min-aspect-ratio: 1/1) {
@@ -416,36 +442,46 @@ kbd {
   .portrait-only { display: none !important; }
 }
 
+/* Medium-height wide windows: a slightly tighter sidebar keeps the hints in view, and below 720 px
+   the key hints give way (How to Play lists every control), below 560 px the drag hint too */
+@media (min-aspect-ratio: 1/1) and (max-height: 800px) {
+  .hud-tray { gap: 6px; }
+  .hud-keys { row-gap: 4px; }
+  .slot { height: 70px; }
+  .slot-canvas { width: 58px; height: 58px; }
+}
+@media (min-aspect-ratio: 1/1) and (max-height: 719.98px) {
+  .hud-keys { display: none !important; }
+}
+
 /* Short wide screens (phones in landscape) */
 @media (min-aspect-ratio: 1/1) and (max-height: 640px) {
-  .hud-keys { display: none !important; }
   .hud-top { row-gap: 6px; padding-top: calc(8px + var(--safe-t)); }
   .hud-height-now { font-size: 24px; }
-  .slot { height: 54px; }
-  .slot-canvas { width: 44px; height: 44px; }
+  .slot { height: 64px; }
+  .slot-canvas { width: 52px; height: 52px; }
   .hud-desc { height: 2.7em; -webkit-line-clamp: 2; line-clamp: 2; }
   .tray-actions .pill { height: 48px; }
-  .drop-btn { --drop: 70px; }
 }
 @media (min-aspect-ratio: 1/1) and (max-height: 560px) {
-  .hud-odds .odds-next { display: none !important; } /* the odds panel still shows it */
+  .hud-odds .odds-next, .hud-drag { display: none !important; } /* the odds panel and How to Play still have them */
 }
 @media (min-aspect-ratio: 1/1) and (max-height: 470px) {
   .hud-milestone, .hud-seed, .hud-odds .odds-bar, .odds-at { display: none !important; }
   .hud-tray { gap: 6px; }
-  .slots { flex-direction: row; gap: 6px; }
-  .slot { flex-direction: column; justify-content: center; gap: 0; height: 64px; padding: 3px; }
+  .slots { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .slot { flex-direction: column; justify-content: center; gap: 0; height: 68px; padding: 3px; }
   .slot::before { top: -2px; bottom: auto; left: 30%; right: 30%; width: auto; height: 3px; border-radius: 0 0 3px 3px; }
-  .slot-canvas { width: 38px; height: 38px; }
+  .slot-canvas { width: 44px; height: 44px; }
   .slot-text { align-items: center; }
   .slot-name { font-size: 11px; }
   .slot-cat, .slot-key { display: none; }
-  .drop-btn { --drop: 60px; }
+  .tray-cue { justify-content: center; text-align: center; font-size: 12px; }
 }
 @media (min-aspect-ratio: 1/1) and (max-height: 340px) {
   .hud-top { row-gap: 4px; padding-top: calc(6px + var(--safe-t)); padding-bottom: 6px; }
-  .slot { height: 58px; }
-  .slot-canvas { width: 34px; height: 34px; }
+  .slot { height: 62px; }
+  .slot-canvas { width: 40px; height: 40px; }
   .hud-tray { padding-bottom: calc(8px + var(--safe-b)); }
 }
 
@@ -558,15 +594,20 @@ kbd {
 
 .hud-keys {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
-  gap: 6px 10px;
+  grid-template-columns: repeat(3, auto);
+  justify-content: space-between;
+  gap: 6px 8px;
   margin: 0;
   font-size: 12px;
   color: var(--muted);
 }
-.hud-keys div { display: flex; align-items: center; gap: 6px; }
+.hud-keys div { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .hud-keys dt { display: flex; gap: 3px; }
 .hud-keys dd { margin: 0; }
+.hud-keys .keys-drop { grid-column: span 2; }
+
+.hud-drag { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12.5px; line-height: 1.35; color: var(--muted); }
+.hud-drag .icon { width: 26px; height: 26px; fill: var(--accent); color: var(--accent); }
 
 .hud-seed { margin: 0; font-size: 12px; color: var(--muted); }
 .hud-seed b { color: var(--text); letter-spacing: 0.05em; }
@@ -669,7 +710,57 @@ h2 { margin: 0 0 8px; font-size: 22px; }
 .btn-small { width: auto; min-height: 44px; padding: 6px 12px; border-radius: 10px; font-size: 13px; }
 
 .menu { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
-.menu-row, .menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.menu-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+/* Restart / Play again with its "Same seed" box right below */
+.restart-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 0 14px 0 10px;
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.check-row:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
+.check-row > span { min-width: 0; line-height: 1.2; overflow-wrap: anywhere; }
+.check-seed { color: var(--text); font-weight: 750; letter-spacing: 0.05em; }
+.check {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  border-radius: 7px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  background: #0a1022;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.check::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 6px;
+  height: 11px;
+  border: solid #ffffff;
+  border-width: 0 3px 3px 0;
+  transform: rotate(45deg) scale(0);
+  transition: transform 0.12s;
+}
+.check:checked { border-color: var(--cold-2); background: var(--cold-2); }
+.check:checked::after { transform: rotate(45deg) scale(1); }
+.check:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.check-row:has(.check:checked) { color: var(--text); }
 
 /* ---- Title ---------------------------------------------------------------------------- */
 .screen-title { background: radial-gradient(120% 90% at 50% 38%, rgba(4, 7, 18, 0.3), rgba(4, 7, 18, 0.85)); }
@@ -910,6 +1001,26 @@ label.type-row:hover { background: rgba(255, 255, 255, 0.035); }
 .controls tbody th { font-weight: 650; color: var(--text); white-space: nowrap; }
 .controls td small { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
 .controls .keys { white-space: nowrap; }
+.howto .controls + .note { margin-top: 8px; }
+/* Narrow panels: one block per action, a labelled line per input */
+@media (max-width: 600px) {
+  .controls thead { display: none; }
+  .controls, .controls tbody, .controls tr, .controls th, .controls td { display: block; }
+  .controls tr { padding: 6px 0 7px; border-top: 1px solid var(--line); }
+  .controls tbody th, .controls td { padding: 2px 0; border-top: 0; }
+  .controls tbody th { padding-bottom: 3px; }
+  .controls td { position: relative; padding-left: 94px; }
+  .controls td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 0;
+    top: 3px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .controls td small { display: inline; margin: 0; }
+  .controls td.none { display: none; }
+}
 .defs { margin: 6px 0; }
 .defs dt { margin-top: 8px; font-weight: 750; color: var(--text); }
 .defs dt small { font-weight: 500; color: var(--muted); }
@@ -973,12 +1084,17 @@ label.type-row:hover { background: rgba(255, 255, 255, 0.035); }
   -webkit-user-select: text;
 }
 
+.over-menu .restart-group { margin-bottom: -4px; }
+
 /* Wide but short (phone landscape): actions side by side so every one fits without scrolling.
-   Pause: two rows of three buttons, in the menu's own order. Game over: result | actions. */
+   Pause: rows of three buttons in the menu's own order, "Same seed" right below Restart and
+   Quit underneath. Game over: result | actions. */
 @media (min-aspect-ratio: 1/1) and (max-height: 500px) {
-  .screen-pause .panel { width: min(100%, 620px); padding: 14px 16px 16px; }
+  .screen-pause .panel { width: min(100%, 680px); padding: 14px 16px 16px; }
   .screen-pause .menu { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
-  .screen-pause .menu .menu-row { display: contents; }
+  .screen-pause .menu .menu-row, .screen-pause .restart-group { display: contents; }
+  .screen-pause .check-row { grid-column: 3; grid-row: 2; justify-self: center; gap: 8px; padding: 0 6px; }
+  .screen-pause [data-action="quit"] { grid-column: 1 / -1; }
   .screen-pause .btn, .screen-over .btn { min-height: 46px; padding: 8px 10px; }
 
   .screen-over .panel {
@@ -990,7 +1106,8 @@ label.type-row:hover { background: rgba(255, 255, 255, 0.035); }
     padding: 14px 18px 16px;
   }
   .screen-over .panel > * { grid-column: 1; }
-  .screen-over .menu-grid { grid-column: 2; grid-row: 1 / span 6; grid-template-columns: 1fr; gap: 8px; margin-top: 0; }
+  .screen-over .over-menu { grid-column: 2; grid-row: 1 / span 6; gap: 8px; margin-top: 0; }
+  .screen-over .over-menu .menu-row { grid-template-columns: 1fr; gap: 8px; }
   .screen-over .copy-fallback { grid-column: 2; }
   .over-height { font-size: 52px; }
   .over-stats { margin-top: 10px; }
@@ -1093,7 +1210,6 @@ label.type-row:hover { background: rgba(255, 255, 255, 0.035); }
   100% { transform: none; opacity: 1; }
 }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-@keyframes pop { 0% { transform: scale(1); } 40% { transform: scale(1.08); } 100% { transform: scale(1); } }
 @keyframes badge-in { 0% { transform: scale(0.6); opacity: 0; } 70% { transform: scale(1.08); opacity: 1; } 100% { transform: none; } }
 @keyframes hit {
   0%, 100% { transform: none; }

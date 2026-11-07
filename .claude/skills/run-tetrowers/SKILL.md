@@ -34,7 +34,8 @@ Without Node the game still runs: open `index.html` directly (file:// is support
 
 Driving it yourself in page context: `TT.App.startGame({ seed: 'ABC' })`; `TT.App.game` exposes
 `state, turn, round, lives, height, bestHeight, mode, batch, piece, physics`. Keys: ArrowLeft/ArrowRight
-move, ArrowUp switch block, ArrowDown or Space drop, Control placement mode, Escape pause.
+move, ArrowDown next block, ArrowUp previous block, Space or Enter drop, Control placement mode,
+Escape pause. On touch or with the mouse: drag a block from the tray onto the playfield and release to drop.
 `?debug=1` in the URL shows FPS and physics stats.
 
 ## Other checks

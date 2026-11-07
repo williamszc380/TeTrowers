@@ -123,13 +123,13 @@ async function session(name, viewport) {
     }
     const plan = await page.evaluate(() => pickMove(window.TT.App.game));
     if (!plan) break;
-    for (let k = 0; k < 3 && (await state()).selected !== plan.slot; k++) await press('ArrowUp', 60);
+    for (let k = 0; k < 3 && (await state()).selected !== plan.slot; k++) await press('ArrowDown', 60); // Down = next block
     for (let k = 0; k < 60; k++) {
       const x = (await state()).x;
       if (x == null || Math.abs(x - plan.x) < 0.02) break;
       await press(x < plan.x ? 'ArrowRight' : 'ArrowLeft', 30);
     }
-    await press('ArrowDown', 900);
+    await press('Enter', 900); // Enter (or Space) drops
   }
   await sleep(1200);
   shots.push(path.join(OUT, name + '-game.png'));

@@ -6,7 +6,7 @@
   'use strict';
 
   TT.CONFIG = Object.freeze({
-    VERSION: '1.0.0',         // keep in sync with VERSION in sw.js (installed copies update on change)
+    VERSION: '1.1.0',         // keep in sync with VERSION in sw.js (installed copies update on change)
 
     // ---- Field -------------------------------------------------------------
     FIELD_WIDTH: 16,          // blocks may be dropped with x in [0, FIELD_WIDTH]

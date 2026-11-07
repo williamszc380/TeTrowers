@@ -1,6 +1,6 @@
 {
   "name": "tetrowers",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "TeTrowers - a physics tower-stacking game with tetromino blocks. The game itself has no dependencies; these scripts and devDependencies are developer tooling only.",
   "license": "MIT",
