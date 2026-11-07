@@ -1,0 +1,18 @@
+{
+  "name": "tetrowers",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TeTrowers - a physics tower-stacking game with tetromino blocks. The game itself has no dependencies; these scripts and devDependencies are developer tooling only.",
+  "license": "MIT",
+  "scripts": {
+    "start": "node tools/run.js",
+    "serve": "node tools/serve.js",
+    "test": "node tests/run.js",
+    "smoke": "node tools/smoke.js",
+    "sim": "node tools/sim.js",
+    "icons": "node tools/make-icons.js"
+  },
+  "devDependencies": {
+    "puppeteer-core": "24.43.1"
+  }
+}

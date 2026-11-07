@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+# TeTrowers: ./run [port] [--no-open] [--browser]
+# Starts the local server and opens the game (Git Bash / macOS / Linux).
+cd "$(dirname "$0")" || exit 1
+if command -v node >/dev/null 2>&1; then
+  exec node tools/run.js "$@"
+fi
+echo "Node.js not found - opening index.html directly (install Node from https://nodejs.org for the local server)."
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) start "" index.html ;;
+  Darwin*) open index.html ;;
+  *) xdg-open index.html ;;
+esac

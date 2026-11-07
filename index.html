@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#0a1024">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Stack falling tetromino blocks into the tallest tower you can. Physics, special blocks and shareable seeds. Works offline.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="TeTrowers">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>TeTrowers</title>
+  <script>
+    // The web app manifest only loads over http(s); on file:// Chrome would log a CORS error.
+    if (/^http/.test(location.protocol)) {
+      var manifestLink = document.createElement('link');
+      manifestLink.rel = 'manifest';
+      manifestLink.href = 'manifest.webmanifest';
+      document.head.appendChild(manifestLink);
+    }
+  </script>
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Icon sprite (referenced with <use href="#i-...">) -->
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.7l-1.3-1.2C6 15.3 3 12.6 3 9.1 3 6.3 5.2 4.1 8 4.1c1.6 0 3.1.7 4 1.9.9-1.2 2.4-1.9 4-1.9 2.8 0 5 2.2 5 5 0 3.5-3 6.2-7.7 10.4L12 20.7z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.6l7.6 3v5.6c0 4.7-3.2 8.9-7.6 10.3-4.4-1.4-7.6-5.6-7.6-10.3V5.6L12 2.6z"/><path d="M8.6 12.2l2.3 2.3 4.6-4.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4.2" height="14" rx="1.2"/><rect x="13.8" y="5" width="4.2" height="14" rx="1.2"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M14.5 5.5L8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-dice" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8.5" cy="8.5" r="1.6"/><circle cx="15.5" cy="15.5" r="1.6"/><circle cx="15.5" cy="8.5" r="1.6"/><circle cx="8.5" cy="15.5" r="1.6"/><circle cx="12" cy="12" r="1.6"/></symbol>
+  </svg>
+
+  <div id="app" class="app no-game">
+    <main id="stage" class="stage">
+      <canvas id="game-canvas" class="game-canvas" aria-label="Playfield"></canvas>
+    </main>
+
+    <!-- HUD: top bar in portrait, upper sidebar on wide screens -->
+    <header id="hud-top" class="hud hud-top">
+      <div id="hud-lives" class="hud-lives" role="img" aria-label="Lives"></div>
+      <div class="hud-height">
+        <span id="hud-height" class="hud-height-now">0.0 m</span>
+        <span class="hud-height-best">best <b id="hud-best">0.0 m</b></span>
+      </div>
+      <button type="button" class="hud-odds wide-only" id="hud-odds" data-action="odds" aria-label="Block odds" title="All block odds (O)">
+        <span class="odds-bar" aria-hidden="true"><i class="odds-seg seg-pos"></i><i class="odds-seg seg-normal"></i><i class="odds-seg seg-neg"></i></span>
+        <span class="odds-text">
+          <span class="odds-good"><i class="odds-mark mark-pos" aria-hidden="true">+</i>Good <b data-odds="pos">0%</b></span>
+          <span class="odds-at">at this height</span>
+          <span class="odds-bad"><i class="odds-mark mark-neg" aria-hidden="true">&minus;</i>Bad <b data-odds="neg">0%</b></span>
+        </span>
+        <span class="odds-next" data-odds="next" hidden></span>
+      </button>
+      <p class="hud-milestone wide-only" id="hud-milestone"></p>
+      <button type="button" class="pill mode-btn portrait-only" data-action="mode" aria-label="Placement mode"><span class="mode-name">Assisted</span></button>
+      <button type="button" class="icon-btn pause-btn" data-action="pause" aria-label="Pause"><svg class="icon" aria-hidden="true"><use href="#i-pause"/></svg></button>
+    </header>
+
+    <!-- Batch tray: bottom in portrait, lower sidebar on wide screens -->
+    <footer id="hud-tray" class="hud hud-tray">
+      <button type="button" class="odds-chip portrait-only" id="odds-chip" data-action="odds" aria-label="Block odds">
+        <span class="chip-row odds-good"><i class="odds-mark mark-pos" aria-hidden="true">+</i><span class="chip-label">Good</span><b class="chip-val" data-odds="pos">0%</b></span>
+        <span class="chip-row odds-bad"><i class="odds-mark mark-neg" aria-hidden="true">&minus;</i><span class="chip-label">Bad</span><b class="chip-val" data-odds="neg">0%</b></span>
+      </button>
+      <p id="hud-desc" class="hud-desc" aria-live="polite"></p>
+      <div class="slots" id="slots">
+        <button type="button" class="slot" data-action="slot" data-slot="0" aria-label="Block 1"><kbd class="slot-key">1</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
+        <button type="button" class="slot" data-action="slot" data-slot="1" aria-label="Block 2"><kbd class="slot-key">2</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
+        <button type="button" class="slot" data-action="slot" data-slot="2" aria-label="Block 3"><kbd class="slot-key">3</kbd><canvas class="slot-canvas"></canvas><span class="slot-text"><span class="slot-name"></span><span class="slot-cat"></span></span></button>
+      </div>
+      <div class="tray-actions">
+        <button type="button" class="pill mode-btn wide-only" data-action="mode" aria-label="Placement mode"><small>Mode</small><span class="mode-name">Assisted</span></button>
+        <button type="button" id="btn-drop" class="drop-btn" data-action="drop" aria-label="Drop block" aria-disabled="true">
+          <svg class="ring" viewBox="0 0 100 100" aria-hidden="true"><circle class="ring-bg" cx="50" cy="50" r="46"/><circle class="ring-fg" cx="50" cy="50" r="46" pathLength="100"/></svg>
+          <span class="drop-label">Drop</span>
+        </button>
+      </div>
+      <dl class="hud-keys wide-only">
+        <div><dt><kbd>&larr;</kbd><kbd>&rarr;</kbd></dt><dd>Move</dd></div>
+        <div><dt><kbd>&uarr;</kbd></dt><dd>Switch</dd></div>
+        <div><dt><kbd>&darr;</kbd></dt><dd>Drop</dd></div>
+        <div><dt><kbd>Ctrl</kbd></dt><dd>Mode</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>Pause</dd></div>
+        <div><dt><kbd>O</kbd></dt><dd>Odds</dd></div>
+        <div><dt><kbd>M</kbd></dt><dd>Mute</dd></div>
+      </dl>
+      <p class="hud-seed wide-only" id="hud-seed"></p>
+    </footer>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <div id="debug" class="debug" hidden></div>
+
+    <div id="screens" class="screens">
+      <!-- TITLE -->
+      <section class="screen screen-title" data-screen="title" aria-label="TeTrowers main menu">
+        <div class="title-wrap">
+          <h1 class="logo" aria-label="TeTrowers">
+            <span class="tile" aria-hidden="true" style="--c:#dde5ec;--k:#26303b;--i:0">T</span><span class="tile" aria-hidden="true" style="--c:#9fe2f5;--k:#0f3a4b;--i:1">e</span><span class="tile" aria-hidden="true" style="--c:#3b78f5;--k:#ffffff;--i:2">T</span><span class="tile" aria-hidden="true" style="--c:#3aa953;--k:#ffffff;--i:3">r</span><span class="tile" aria-hidden="true" style="--c:#a39f97;--k:#25221f;--i:4">o</span><span class="tile" aria-hidden="true" style="--c:#cf8a3d;--k:#2b1806;--i:5">w</span><span class="tile" aria-hidden="true" style="--c:#ff6a1a;--k:#2b0d00;--i:6">e</span><span class="tile" aria-hidden="true" style="--c:#d33a34;--k:#ffffff;--i:7">r</span><span class="tile" aria-hidden="true" style="--c:#24242b;--k:#ff8a6b;--i:8">s</span>
+          </h1>
+          <p class="tagline">Stack the tower. <span class="cold">Cold blocks help</span>, <span class="warm">warm blocks bite</span>.</p>
+          <p class="title-best" id="title-best"></p>
+          <nav class="menu" aria-label="Main menu">
+            <button type="button" class="btn btn-primary" data-action="play-url" id="btn-play-url" data-autofocus hidden>Play seed <b id="play-url-seed"></b></button>
+            <button type="button" class="btn btn-primary" data-action="play" id="btn-play" data-autofocus>Play <small>random seed</small></button>
+            <button type="button" class="btn" data-action="daily">Daily Challenge <small id="daily-sub"></small></button>
+            <button type="button" class="btn" data-action="open" data-target="seed">Enter Seed</button>
+            <button type="button" class="btn" data-action="open" data-target="blocks">Special Blocks <small id="blocks-sub"></small></button>
+            <div class="menu-row">
+              <button type="button" class="btn" data-action="open" data-target="howto">How to Play</button>
+              <button type="button" class="btn" data-action="open" data-target="settings">Settings</button>
+            </div>
+          </nav>
+          <p class="version" id="version"></p>
+        </div>
+      </section>
+
+      <!-- SEED ENTRY -->
+      <section class="screen" data-screen="seed" aria-labelledby="seed-title" hidden>
+        <div class="panel">
+          <header class="panel-head">
+            <button type="button" class="icon-btn back-btn" data-action="back" aria-label="Back"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
+            <h2 id="seed-title">Enter Seed</h2>
+          </header>
+          <form id="seed-form" class="seed-form" autocomplete="off" novalidate>
+            <label class="label" for="seed-input">Seed</label>
+            <div class="seed-row">
+              <input id="seed-input" class="text-input" type="text" maxlength="32" placeholder="e.g. K7QP2M" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="go" data-autofocus>
+              <button type="button" class="icon-btn" data-action="seed-random" aria-label="Random seed" title="Random seed"><svg class="icon" aria-hidden="true"><use href="#i-dice"/></svg></button>
+            </div>
+            <p class="hint" id="seed-best"></p>
+            <button type="submit" class="btn btn-primary">Play</button>
+          </form>
+          <p class="note">The same seed with the same special-block set always deals the same blocks in the same order, so you and your friends can compare heights fairly.</p>
+          <p class="note" id="seed-rules"></p>
+        </div>
+      </section>
+
+      <!-- SPECIAL BLOCKS -->
+      <section class="screen" data-screen="blocks" aria-labelledby="blocks-title" hidden>
+        <div class="panel panel-wide">
+          <header class="panel-head">
+            <button type="button" class="icon-btn back-btn" data-action="back" aria-label="Back" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
+            <h2 id="blocks-title">Special Blocks</h2>
+          </header>
+          <p class="note">Choose which special blocks can appear in your runs. All of them are on by default.</p>
+          <div id="type-groups" class="type-groups"></div>
+          <p class="note note-box" id="blocks-summary"></p>
+        </div>
+      </section>
+
+      <!-- HOW TO PLAY -->
+      <section class="screen" data-screen="howto" aria-labelledby="howto-title" hidden>
+        <div class="panel panel-wide">
+          <header class="panel-head">
+            <button type="button" class="icon-btn back-btn" data-action="back" aria-label="Back" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
+            <h2 id="howto-title">How to Play</h2>
+          </header>
+          <div class="howto">
+            <p class="lead">Drop blocks onto the platform and build the tallest tower you can. Your score is the best height your tower reaches.</p>
+
+            <h3>Controls</h3>
+            <table class="controls">
+              <thead><tr><th scope="col"></th><th scope="col">Keyboard</th><th scope="col">Touch</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Move</th><td><span class="keys"><kbd>&larr;</kbd> <kbd>&rarr;</kbd></span><small>hold to repeat</small></td><td>Drag anywhere on the playfield</td></tr>
+                <tr><th scope="row">Switch block</th><td><kbd>&uarr;</kbd> or <span class="keys"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></td><td>Tap a block in the tray</td></tr>
+                <tr><th scope="row">Drop</th><td><kbd>&darr;</kbd> or <kbd>Space</kbd></td><td>Drop button or a quick swipe down</td></tr>
+                <tr><th scope="row">Placement mode</th><td><kbd>Ctrl</kbd></td><td>Mode button</td></tr>
+                <tr><th scope="row">Pause</th><td><kbd>Esc</kbd> or <kbd>P</kbd></td><td>Pause button</td></tr>
+                <tr><th scope="row">Block odds</th><td><kbd>O</kbd></td><td>Tap the Good / Bad odds</td></tr>
+                <tr><th scope="row">Sound</th><td><kbd>M</kbd> mutes</td><td>Settings</td></tr>
+              </tbody>
+            </table>
+
+            <h3>Placement modes</h3>
+            <dl class="defs">
+              <dt>Assisted <small>(default)</small></dt>
+              <dd>Steps between the spots where your block sits flush with the block it will land on, and in half-block steps over empty space. While it falls it follows its target, so a support that shifts a little cannot make it clip a corner and miss.</dd>
+              <dt>Fixed</dt>
+              <dd>Half-block steps. No help while falling.</dd>
+              <dt>Manual</dt>
+              <dd>Pixel-precise. A tap moves one pixel, holding slides faster and faster, and dragging is 1:1.</dd>
+            </dl>
+
+            <h3>Turns and lives</h3>
+            <ul class="bullets">
+              <li>Each round deals <b data-c="BATCH_SIZE">3</b> blocks. Place them in any order; the next round comes when all of them are down.</li>
+              <li>A turn runs from one drop to the next. The first block that falls off the tower during a turn costs a life. Any more losses in the same turn are free.</li>
+              <li>Blocks that are swallowed, blown up, melted or destroyed by spikes do not cost lives.</li>
+              <li>You have <b data-c="MAX_LIVES">3</b> lives. When the last one is gone, the run is over.</li>
+            </ul>
+
+            <h3>Milestones</h3>
+            <p>Every <b data-c="LIFE_MILESTONE">10</b> m of best height gives you a life back. A Crystal Heart restores one too, or gives you a shield when your lives are full. The dashed line on the playfield marks the next milestone.</p>
+
+            <h3>The higher, the meaner</h3>
+            <p><span class="cold">Good blocks (cold colours: white, green, blue)</span> get rarer and <span class="warm">bad blocks (warm colours: red, orange, black)</span> more common as your tower grows. Every run ends eventually, so make every drop count.</p>
+            <p>The <span class="cold">Good</span> / <span class="warm">Bad</span> odds on screen are the chances for each block you are dealt at your best height. Tap them (or press <kbd>O</kbd>) to see every block's odds and which block unlocks next.</p>
+
+            <h3>Petrify</h3>
+            <p>Blocks that sit more than <b data-c="PETRIFY_DEPTH">14</b> m below the top of the tower slowly turn to stone (they look a little faded) and never move again. The base of a tall tower becomes solid ground.</p>
+
+            <h3>Seeds</h3>
+            <p>Every run has a seed. The same seed with the same special-block set deals the same blocks, so you can challenge friends on a seed, or everyone on the Daily Challenge.</p>
+
+            <h3>Block codex</h3>
+            <div id="codex" class="codex"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="screen" data-screen="settings" aria-labelledby="settings-title" hidden>
+        <div class="panel">
+          <header class="panel-head">
+            <button type="button" class="icon-btn back-btn" data-action="back" aria-label="Back" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
+            <h2 id="settings-title">Settings</h2>
+          </header>
+          <div class="field">
+            <div class="label" id="mode-label">Default placement mode</div>
+            <div class="segmented" role="radiogroup" aria-labelledby="mode-label">
+              <label><input type="radio" name="set-mode" value="assisted"><span>Assisted</span></label>
+              <label><input type="radio" name="set-mode" value="fixed"><span>Fixed</span></label>
+              <label><input type="radio" name="set-mode" value="manual"><span>Manual</span></label>
+            </div>
+            <p class="hint" id="mode-hint"></p>
+          </div>
+          <label class="switch-row"><span class="switch-text"><b>Sound</b><small>Synthesised effects. <kbd>M</kbd> toggles it in game.</small></span><input type="checkbox" class="switch" role="switch" data-setting="sound"></label>
+          <label class="switch-row"><span class="switch-text"><b>Vibration</b><small id="vibration-hint">Haptic feedback on phones that support it.</small></span><input type="checkbox" class="switch" role="switch" data-setting="vibration"></label>
+          <label class="switch-row"><span class="switch-text"><b>Ghost preview</b><small>Outline where the block will land.</small></span><input type="checkbox" class="switch" role="switch" data-setting="ghost"></label>
+          <label class="switch-row"><span class="switch-text"><b>Reduced motion</b><small>No screen shake, calmer effects.</small></span><input type="checkbox" class="switch" role="switch" data-setting="reducedMotion"></label>
+        </div>
+      </section>
+
+      <!-- PAUSE -->
+      <section class="screen screen-pause" data-screen="pause" aria-labelledby="pause-title" hidden>
+        <div class="panel panel-narrow">
+          <h2 id="pause-title" class="center">Paused</h2>
+          <p class="pause-info" id="pause-info"></p>
+          <div class="menu">
+            <button type="button" class="btn btn-primary" data-action="resume" data-autofocus>Resume</button>
+            <button type="button" class="btn" data-action="odds">Block odds <small><span class="cold">Good <span data-odds="pos"></span></span> · <span class="warm">Bad <span data-odds="neg"></span></span></small></button>
+            <button type="button" class="btn" data-action="restart" data-confirm="Press again to restart">Restart this seed</button>
+            <div class="menu-row">
+              <button type="button" class="btn" data-action="open" data-target="howto">How to Play</button>
+              <button type="button" class="btn" data-action="open" data-target="settings">Settings</button>
+            </div>
+            <button type="button" class="btn btn-quiet" data-action="quit" data-confirm="Press again to quit">Quit to menu</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- BLOCK ODDS (rows built by ui.js) -->
+      <section class="screen" data-screen="odds" aria-labelledby="odds-title" hidden>
+        <div class="panel panel-wide">
+          <header class="panel-head">
+            <button type="button" class="icon-btn back-btn" data-action="back" aria-label="Back" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
+            <h2 id="odds-title">Block odds</h2>
+          </header>
+          <p class="note">The chances for each block you are dealt at your best height. Good blocks get rarer and bad ones more common the higher you build.</p>
+          <div class="odds-body">
+            <div class="odds-col" id="odds-col-good">
+              <div class="odds-summary">
+                <span class="odds-bar" aria-hidden="true"><i class="odds-seg seg-pos"></i><i class="odds-seg seg-normal"></i><i class="odds-seg seg-neg"></i></span>
+                <ul class="odds-legend">
+                  <li class="odds-good"><span class="leg-key"><i class="odds-mark mark-pos" aria-hidden="true">+</i>Good</span> <b data-odds="pos"></b></li>
+                  <li class="odds-normal"><span class="leg-key"><i class="odds-mark mark-normal" aria-hidden="true"></i>Normal</span> <b data-odds="normal"></b></li>
+                  <li class="odds-bad"><span class="leg-key"><i class="odds-mark mark-neg" aria-hidden="true">&minus;</i>Bad</span> <b data-odds="neg"></b></li>
+                </ul>
+                <p class="odds-next" data-odds="next" hidden></p>
+              </div>
+            </div>
+            <div class="odds-col" id="odds-col-bad"></div>
+          </div>
+          <p class="note" id="odds-foot" hidden>Blocks marked <b>off</b> are switched off under Special Blocks.</p>
+        </div>
+      </section>
+
+      <!-- GAME OVER -->
+      <section class="screen screen-over" data-screen="over" aria-labelledby="over-title" hidden>
+        <div class="panel panel-narrow">
+          <h2 id="over-title" class="over-kicker">Tower down</h2>
+          <p class="over-height"><span id="over-height">0.0</span><small>m</small></p>
+          <p class="badge" id="over-badge" hidden>New best</p>
+          <dl class="over-stats">
+            <div><dt>Time</dt><dd id="over-time">0:00</dd></div>
+            <div><dt>Drops</dt><dd id="over-drops">0</dd></div>
+            <div><dt>Blocks lost</dt><dd id="over-lost">0</dd></div>
+          </dl>
+          <p class="over-seed" id="over-seed"></p>
+          <p class="hint center" id="over-prev"></p>
+          <div class="menu menu-grid">
+            <button type="button" class="btn btn-primary" data-action="restart" data-autofocus>Play same seed</button>
+            <button type="button" class="btn" data-action="new-seed">New seed</button>
+            <button type="button" class="btn" data-action="copy" id="btn-copy">Copy result</button>
+            <button type="button" class="btn btn-quiet" data-action="menu">Menu</button>
+          </div>
+          <textarea id="copy-fallback" class="copy-fallback" readonly rows="3" aria-label="Result text" hidden></textarea>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <noscript><div class="noscript">TeTrowers needs JavaScript to run. Please enable it and reload the page.</div></noscript>
+
+  <script src="js/lib/planck.min.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/rng.js"></script>
+  <script src="js/shapes.js"></script>
+  <script src="js/blocktypes.js"></script>
+  <script src="js/generator.js"></script>
+  <script src="js/physics.js"></script>
+  <script src="js/effects.js"></script>
+  <script src="js/placement.js"></script>
+  <script src="js/game.js"></script>
+  <script src="js/particles.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

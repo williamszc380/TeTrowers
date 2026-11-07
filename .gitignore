@@ -1,0 +1,10 @@
+# Developer tooling only (the game itself has no dependencies)
+node_modules/
+
+# Logs and OS clutter
+*.log
+.DS_Store
+Thumbs.db
+
+# Tool output (e.g. tools/smoke.js screenshots)
+tools/out/

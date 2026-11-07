@@ -1,0 +1,7 @@
+# Shell scripts must keep LF endings (a CR after the shebang breaks ./run in Git Bash)
+run text eol=lf
+*.sh text eol=lf
+# Windows scripts keep CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.png binary
